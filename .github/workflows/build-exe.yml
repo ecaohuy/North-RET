@@ -1,0 +1,52 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openpyxl pyinstaller
+
+      - name: Build EXE
+        run: >
+          pyinstaller --onefile --windowed --name North-RET
+          --icon "huawei.ico"
+          --add-data "mapping.json;."
+          --add-data "Template.xlsx;."
+          --add-data "RET_template.txt;."
+          --add-data "RET_input.txt;."
+          --add-data "huawei.ico;."
+          --add-data "huawei.png;."
+          ret_gui.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: North-RET
+          path: dist/North-RET.exe
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/North-RET.exe

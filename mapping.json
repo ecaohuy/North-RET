@@ -1,0 +1,115 @@
+{
+  "description": "NewRET mapping: generate RETConfigWDTInternal (Internal sheet) from the CDD '4G CDD' sheet. Simpler than ../01.RET: no 3G sheet, no Local Cell ID band lookup, and a fixed set of 4 RET devices per sector. Band/sector come straight from CellName (New)[Key].",
+  "source": {
+    "file": "CDD.xlsx",
+    "sheet": "4G CDD",
+    "match_columns_by": "header_name",
+    "_note": "Columns are located by HEADER NAME (case/whitespace tolerant), so extra/reordered CDD columns don't break parsing. The 4G CDD sheet has a category row above the real header row; the header row is found by locating the cell_name column.",
+    "headers": {
+      "site_new": "SiteName (RRU Location)_New",
+      "ne_name": "NEName_New",
+      "ne_id": "Ne ID (New)",
+      "cell_name": "CellName (New)[Key]",
+      "e_tilt": "E_TILT",
+      "bbu_cluster": "BBU Cluster"
+    }
+  },
+  "extraction": {
+    "X": {
+      "formula": "LEFT(RIGHT(CellName (New)[Key], 2), 1)",
+      "meaning": "2nd-to-last char of CellName -> band letter"
+    },
+    "Y": {
+      "formula": "RIGHT(CellName (New)[Key], 1)",
+      "meaning": "last char of CellName -> sector letter"
+    }
+  },
+  "band_freq": {
+    "_note": "Reference only: the band letter X -> frequency. Used to pick which CDD row's E_TILT feeds each device (see devices[].tilt_band).",
+    "A": "700Mhz F1",
+    "B": "900Mhz F1",
+    "C": "1800Mhz F1",
+    "D": "1800Mhz F2",
+    "E": "2100Mhz F1",
+    "F": "2100Mhz F2"
+  },
+  "sector_rule": {
+    "srn_base": 60,
+    "max_sectors": 9,
+    "note": "Y (last char of CellName) -> sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). Anything else (e.g. 'M', 'X', dashed VNP names) is skipped."
+  },
+  "devices": [
+    { "name": "Lb1",  "color": "Lb1",  "band_token": "L1800",      "slot_suffix": "_1", "tilt_band": "C", "tilt_fallback": "D" },
+    { "name": "CLb2", "color": "CLb2", "band_token": "L1800",      "slot_suffix": "_2", "tilt_band": "D", "tilt_fallback": "C" },
+    { "name": "CRb3", "color": "CRb3", "band_token": "NSN_L1800",  "slot_suffix": "_1", "tilt_band": "C", "tilt_fallback": "D" },
+    { "name": "Rb4",  "color": "Rb4",  "band_token": "E///_U2100", "slot_suffix": "_2", "tilt_band": "C", "tilt_fallback": "D" }
+  ],
+  "constants": {
+    "rru_cn": 0,
+    "rru_sn": 0,
+    "site_name_suffix": "_LN"
+  },
+  "bbu_cluster": {
+    "header": "BBU Cluster",
+    "note": "GUI filter: the distinct BBU Cluster values of the 4G CDD are offered for (multi) selection; only sectors whose BBU Cluster is selected are emitted. No selection = all clusters."
+  },
+  "target": {
+    "file": "Template.xlsx",
+    "sheet": "Internal",
+    "columns": {
+      "site_name": "站点名称 / Site Name(*)",
+      "rru_name": "RCU所在扇区名称 / RRU Name(*)",
+      "rru_cn": "RRU柜号 / RRU CN(*)",
+      "rru_srn": "RRU框号 / RRU SRN(*)",
+      "rru_sn": "RRU槽号 / RRU SN(*)",
+      "rcu_coloring": "天线Color编码 / RCU Coloring(*)",
+      "rcu_tilt": "电调天线角度 / RCU Tilt(*) unit=0.1度",
+      "device_name": "设备名称 / Device Name"
+    }
+  },
+  "field_rules": {
+    "site_name": {
+      "expr": "{site_new}{site_name_suffix}",
+      "example": "DNGNTH29_LN"
+    },
+    "rru_name": {
+      "expr": "{site_new}_{band_token}_{sector_id}{slot_suffix}",
+      "prefix_source": "site_new",
+      "example": "DNGNTH29_L1800_S1_1"
+    },
+    "rru_cn":  { "value": 0 },
+    "rru_srn": { "from": "sector_rule: srn_base + (sector_number - 1)" },
+    "rru_sn":  { "value": 0 },
+    "rcu_coloring": { "from": "devices[].color" },
+    "rcu_tilt": {
+      "expr": "round(E_TILT * 10)",
+      "unit": "0.1 degree",
+      "note": "E_TILT is taken from the CDD row of the device's tilt_band (fallback tilt_fallback). Lb1 & CRb3 & Rb4 use band C (1800Mhz F1); CLb2 uses band D (1800Mhz F2)."
+    },
+    "device_name": {
+      "expr": "{rru_name}",
+      "note": "Device Name (col H) == RRU Name (col B)."
+    }
+  },
+  "text_config": {
+    "description": "RET_template.txt -> RET_output.txt (ADD RET / MOD RETTILT MML). DEVICENAME prefix, SERIALNO and TILT are rewritten from RET_input.txt + the CDD-derived rows.",
+    "input": {
+      "_note": "RET_input.txt: line 1 = site name (== CDD SiteName_New); remaining lines are whitespace/tab separated. Indices are 0-based after splitting.",
+      "site_line": 0,
+      "ctrlsrn_column": 1,
+      "serial_column": 7,
+      "serial_suffix_len": 3
+    },
+    "template": {
+      "_note": "prefix_token_count = number of leading underscore tokens in DEVICENAME forming the site prefix (site + Ne ID) that get replaced; the band/sector/slot suffix is kept.",
+      "prefix_token_count": 2,
+      "add_line_prefix": "ADD RET",
+      "tilt_line_prefix": "MOD RETTILT"
+    },
+    "rules": {
+      "devicename": "Replace the leading {prefix_token_count} tokens of DEVICENAME with {SiteName_New}_{Ne ID}; keep the band/sector/slot suffix from the template.",
+      "serialno": "Replace SERIALNO with the input serial whose (CTRLSRN, RIGHT(serial, serial_suffix_len)) matches the template line's (CTRLSRN, RIGHT(SERIALNO, serial_suffix_len)).",
+      "tilt": "MOD RETTILT TILT = the RCU Tilt of the ADD RET device with the same DEVICENO, matched positionally: CTRLSRN -> sector_id, plus the device's order within that sector (1st..4th) -> that sector's device RCU Tilt."
+    }
+  }
+}

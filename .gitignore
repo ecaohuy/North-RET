@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.~*
+RETConfigWDTInternal_new.xlsx
+RET_output.txt
+# Input data / build artifacts (selected at runtime, not bundled)
+CDD.xlsx
+build/
+dist/
+*.spec
