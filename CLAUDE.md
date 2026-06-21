@@ -20,10 +20,15 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   picks which CDD row's `E_TILT` feeds each device's tilt (`tilt_band`,
   `tilt_fallback`): Lb1/CRb3/Rb4 use band C (1800 F1), CLb2 uses band D.
 - RRU/Device Name = `{SiteName_New}_{band_token}_{sector_id}{slot}`
-  (no Ne ID). Site Name(*) = `{SiteName_New}_LN`.
+  (no Ne ID). Site Name(*) = `NEName_New` (verbatim from the CDD).
 - Sectors are resolved by a computed rule (`sector_rule`), not a fixed
-  table: digit `1-9` or letter `A-I` → sector n; `rru_srn = srn_base +
-  (n-1)` (S1=60…). Non-conforming names (e.g. dashed `VNP-4G-…`) skip.
+  table: digit `1-9` or letter `A-I` → base sector n; `rru_srn = srn_base +
+  (n-1)` (S1=60…). A **co-located offset** then applies: if
+  `LEFT(NEName_New, match_prefix_len)` == `LEFT(CellName, match_prefix_len)`
+  (default `match_prefix_len`=8, the site code) the cell is the NE's own
+  site and keeps n; otherwise it is a co-located neighbour and gets
+  `+colocated_offset` (default 3: S1→S4, S2→S5, S3→S6). Non-conforming
+  names (e.g. dashed `VNP-4G-…`) skip.
 - New feature: **BBU Cluster filter**. The GUI multi-selects distinct
   `BBU Cluster` values; only those sectors are emitted (none = all).
 - MML feature keeps the old behaviour: DEVICENAME prefix →
