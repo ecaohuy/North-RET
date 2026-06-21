@@ -36,7 +36,9 @@
   "sector_rule": {
     "srn_base": 60,
     "max_sectors": 9,
-    "note": "Y (last char of CellName) -> sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). Anything else (e.g. 'M', 'X', dashed VNP names) is skipped."
+    "colocated_offset": 3,
+    "match_prefix_len": 8,
+    "note": "Y (last char of CellName) -> base sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). A co-located offset is then added: if LEFT(NEName_New, match_prefix_len) == LEFT(CellName, match_prefix_len) the cell is the NE's OWN site and keeps its base number (S1,S2,S3,...); otherwise it is a co-located neighbour and gets +colocated_offset (S1->S4, S2->S5, S3->S6). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). NOTE: match_prefix_len is 8 (the site code length); char 9 of NEName_New is the '_'/'-' separator, so a length of 9 never matches. Anything outside 1..max_sectors (e.g. 'M', 'X', dashed VNP names) is skipped."
   },
   "devices": [
     { "name": "Lb1",  "color": "Lb1",  "band_token": "L1800",      "slot_suffix": "_1", "tilt_band": "C", "tilt_fallback": "D" },
@@ -46,8 +48,7 @@
   ],
   "constants": {
     "rru_cn": 0,
-    "rru_sn": 0,
-    "site_name_suffix": "_LN"
+    "rru_sn": 0
   },
   "bbu_cluster": {
     "header": "BBU Cluster",
@@ -69,13 +70,17 @@
   },
   "field_rules": {
     "site_name": {
-      "expr": "{site_new}{site_name_suffix}",
-      "example": "DNGNTH29_LN"
+      "source": "ne_name",
+      "expr": "{ne_name}",
+      "note": "Site Name(*) is NEName_New from the CDD, taken verbatim.",
+      "example": "HNITLM06_LN"
     },
     "rru_name": {
-      "expr": "{site_new}_{band_token}_{sector_id}{slot_suffix}",
+      "expr": "{prefix}_{band_token}_{sector_id}{slot_suffix}",
       "prefix_source": "site_new",
-      "example": "DNGNTH29_L1800_S1_1"
+      "prefix_delimiters": ["_", "-"],
+      "note": "Prefix = the part of SiteName (RRU Location)_New before the first of any delimiter char. e.g. HNITLM06_LN -> HNITLM06 -> {prefix}_L1800_S1_1.",
+      "example": "HNITLM06_L1800_S1_1"
     },
     "rru_cn":  { "value": 0 },
     "rru_srn": { "from": "sector_rule: srn_base + (sector_number - 1)" },

@@ -76,12 +76,14 @@ def _to_float(v):
         return None
 
 
-def resolve_sector(Y, mapping):
-    """Map the sector letter/digit Y to (sector_id, rru_srn), or None if invalid.
+def resolve_sector(Y, mapping, offset=0):
+    """Map the sector letter/digit Y (+ offset) to (sector_id, rru_srn), or None.
 
-    Per mapping.json -> sector_rule: a digit 1-9 is that sector number; a single
-    letter A-I maps to 1-9 (A=S1 ... I=S9). sector_id = 'S{n}', rru_srn =
-    srn_base + (n - 1). Returns None for anything outside 1..max_sectors.
+    Per mapping.json -> sector_rule: a digit 1-9 is that base sector number; a
+    single letter A-I maps to 1-9 (A=S1 ... I=S9). ``offset`` (the co-located
+    offset, 0 for the NE's own site) is added to that base number. sector_id =
+    'S{n}', rru_srn = srn_base + (n - 1). Returns None for anything outside
+    1..max_sectors.
     """
     rule = mapping.get("sector_rule", {})
     base = rule.get("srn_base", 60)
@@ -92,7 +94,10 @@ def resolve_sector(Y, mapping):
         n = int(Y)
     elif len(Y) == 1 and Y.upper().isalpha():
         n = ord(Y.upper()) - ord("A") + 1
-    if n is None or not (1 <= n <= max_sectors):
+    if n is None:
+        return None
+    n += offset
+    if not (1 <= n <= max_sectors):
         return None
     return f"S{n}", base + (n - 1)
 
@@ -163,7 +168,15 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     devices = mapping["devices"]
     rru_cn = mapping["constants"]["rru_cn"]
     rru_sn = mapping["constants"]["rru_sn"]
-    site_suffix = mapping["constants"].get("site_name_suffix", "")
+    field_rules = mapping.get("field_rules", {})
+    # Site Name(*) comes from this CDD field (default NEName_New).
+    site_name_source = field_rules.get("site_name", {}).get("source", "ne_name")
+    # RRU Name(*) prefix = the part of this field before the first of these delimiters.
+    rru_prefix_source = field_rules.get("rru_name", {}).get("prefix_source", "site_new")
+    rru_prefix_delims = field_rules.get("rru_name", {}).get("prefix_delimiters", ["_"])
+    sector_rule = mapping.get("sector_rule", {})
+    match_len = sector_rule.get("match_prefix_len", 8)
+    colocated_offset = sector_rule.get("colocated_offset", 3)
     cluster_filter = {str(c).strip() for c in clusters} if clusters else None
 
     wb = load_workbook(cdd_path, data_only=True, read_only=True)
@@ -191,6 +204,8 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
 
     by_sector = defaultdict(dict)   # (site_new, Y) -> {X: e_tilt}
     sector_ne_id = {}               # (site_new, Y) -> Ne ID (first non-blank)
+    sector_ne_name = {}             # (site_new, Y) -> NEName_New (first non-blank)
+    sector_offset = {}              # (site_new, Y) -> 0 (own site) or colocated_offset
     sector_order = []
     seen = set()
     skipped = []
@@ -215,16 +230,27 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
                 continue
         X = cell[-2]   # band letter
         Y = cell[-1]   # sector letter/digit
-        if resolve_sector(Y, mapping) is None:
+        # Own site (cell belongs to this NE) keeps its base sector number; a
+        # co-located neighbour (LEFT(NEName,N) != LEFT(CellName,N)) is shifted by
+        # colocated_offset (S1->S4, S2->S5, S3->S6).
+        ne_name_val = _get(r, "ne_name")
+        ne_name_val = str(ne_name_val).strip() if ne_name_val is not None else ""
+        is_own = ne_name_val[:match_len].upper() == cell[:match_len].upper()
+        offset = 0 if is_own else colocated_offset
+        if resolve_sector(Y, mapping, offset) is None:
             skipped.append((cell, f"unknown sector Y={Y}"))
             continue
         key = (site_new, Y)
         if key not in seen:
             seen.add(key)
             sector_order.append(key)
+            sector_offset[key] = offset
         ne_id = _get(r, "ne_id")
         if ne_id not in (None, "") and key not in sector_ne_id:
             sector_ne_id[key] = ne_id
+        nn = _get(r, site_name_source)
+        if nn not in (None, "") and key not in sector_ne_name:
+            sector_ne_name[key] = str(nn).strip()
         # E_TILT per band; first non-blank wins so a blank row can't clobber it.
         t = _to_float(_get(r, "e_tilt"))
         if X not in by_sector[key] or (by_sector[key].get(X) is None and t is not None):
@@ -234,10 +260,17 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     site_index = {}
     for key in sector_order:
         site_new, Y = key
-        sector_id, rru_srn = resolve_sector(Y, mapping)
+        sector_id, rru_srn = resolve_sector(Y, mapping, sector_offset.get(key, 0))
         present = by_sector[key]            # {X: e_tilt} for this sector
         ne_id = sector_ne_id.get(key, "")
-        site_name = f"{site_new}{site_suffix}"
+        # Site Name(*) = NEName_New (fallback to SiteName_New if blank).
+        site_name = sector_ne_name.get(key, "") or site_new
+        # RRU Name(*) prefix = part of the configured source field before the first
+        # delimiter char (default SiteName (RRU Location)_New).
+        rru_prefix = {"site_new": site_new, "ne_name": site_name,
+                      "site_name": site_name}.get(rru_prefix_source, site_new)
+        for d in rru_prefix_delims:
+            rru_prefix = rru_prefix.split(d)[0]
         site_entry = site_index.setdefault(
             site_new, {"prefix": f"{site_new}_{ne_id}".rstrip("_"), "tilts": {}}
         )
@@ -247,7 +280,7 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
             if t is None:
                 t = present.get(dev.get("tilt_fallback"))
             rcu_tilt = round((t or 0.0) * 10)
-            rru_name = f"{site_new}_{dev['band_token']}_{sector_id}{dev['slot_suffix']}"
+            rru_name = f"{rru_prefix}_{dev['band_token']}_{sector_id}{dev['slot_suffix']}"
             site_entry["tilts"][(sector_id, pos)] = rcu_tilt
             rows.append([
                 site_name,
