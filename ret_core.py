@@ -34,12 +34,12 @@ def load_mapping(path):
         return json.load(f)
 
 
-def _require_mapping_keys(mapping):
-    """Validate that the mapping.json is the NewRET format, with a clear error.
+def mapping_problems(mapping):
+    """Return a list of human-readable reasons ``mapping`` is not NewRET format.
 
-    The GUI lets the user Browse to any mapping.json; pointing it at the older
-    ../01.RET mapping (which has no ``devices``/``constants``) used to crash with
-    a bare ``KeyError: 'devices'``. Surface an actionable message instead.
+    Empty list = a valid NewRET mapping. The GUI lets the user Browse to any
+    mapping.json; pointing it at the older ../01.RET mapping (which has no
+    ``devices``/``constants``) used to crash with a bare ``KeyError: 'devices'``.
     """
     problems = []
     if not isinstance(mapping.get("devices"), list) or not mapping.get("devices"):
@@ -47,6 +47,12 @@ def _require_mapping_keys(mapping):
     consts = mapping.get("constants")
     if not isinstance(consts, dict) or "rru_cn" not in consts or "rru_sn" not in consts:
         problems.append('"constants" with "rru_cn" and "rru_sn"')
+    return problems
+
+
+def _require_mapping_keys(mapping):
+    """Raise a clear ValueError if ``mapping`` is not a NewRET mapping."""
+    problems = mapping_problems(mapping)
     if problems:
         raise ValueError(
             "This mapping.json is not a NewRET mapping — it is missing: "
@@ -201,6 +207,14 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     match_len = sector_rule.get("match_prefix_len", 8)
     colocated_offset = sector_rule.get("colocated_offset", 3)
     cluster_filter = {str(c).strip() for c in clusters} if clusters else None
+    # RET MML only: which CDD field the RET input line 1 is matched against AND
+    # which supplies the SITE token of the rewritten DEVICENAME prefix. "ne_name"
+    # = NEName_New (default), "site_new" = SiteName_New.
+    site_match = mapping.get("text_config", {}).get("site_match", {})
+    site_match_field = site_match.get("field", "ne_name")
+    # Append the Ne ID to the prefix? Templates whose DEVICENAME is just
+    # {site}_{band}_{sector}_{slot} (no Ne ID) set this false.
+    include_ne_id = site_match.get("include_ne_id", False)
 
     wb = load_workbook(cdd_path, data_only=True, read_only=True)
     try:
@@ -294,8 +308,12 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
                       "site_name": site_name}.get(rru_prefix_source, site_new)
         for d in rru_prefix_delims:
             rru_prefix = rru_prefix.split(d)[0]
+        # RET MML: the RET input line 1 is matched against site_match_field
+        # (NEName_New by default), which also supplies the DEVICENAME site token.
+        prefix_site = site_name if site_match_field == "ne_name" else site_new
+        prefix = f"{prefix_site}_{ne_id}".rstrip("_") if include_ne_id else str(prefix_site)
         site_entry = site_index.setdefault(
-            site_new, {"prefix": f"{site_new}_{ne_id}".rstrip("_"), "tilts": {}}
+            prefix_site, {"prefix": prefix, "tilts": {}}
         )
 
         for pos, dev in enumerate(devices):
@@ -386,7 +404,10 @@ def write_output(template_path, target_sheet, rows, output_path):
 #
 # Rewrites three things in an "ADD RET / MOD RETTILT" MML template using the
 # RET_input.txt serials and the CDD-derived rows (build_rows):
-#   * DEVICENAME : replace the site-prefix tokens with {SiteName_New}_{Ne ID}.
+#   * DEVICENAME : replace the leading site token(s) with the site_match prefix
+#                  (NEName_New by default, no Ne ID), keeping the band/sector/slot
+#                  suffix so the output matches the template. The RET input line 1
+#                  is matched against that same field (site_match.field).
 #   * SERIALNO   : take the input serial matched by (CTRLSRN, RIGHT(serial, N)).
 #   * TILT       : RCU Tilt of the same-DEVICENO ADD RET device, matched
 #                  positionally (CTRLSRN -> sector, device order within sector).

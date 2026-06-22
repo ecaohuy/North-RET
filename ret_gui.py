@@ -172,6 +172,8 @@ class App(tk.Tk):
         ttk.Label(inp, text="Sheet:").grid(row=1, column=0, sticky="w", padx=8, pady=4)
         self.text_sheet_combo = ttk.Combobox(inp, textvariable=self.sheet_var, state="readonly")
         self.text_sheet_combo.grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Button(inp, text="Reload CDD", command=self._reload_cdd).grid(
+            row=1, column=2, sticky="ew", padx=8, pady=4)
         self._file_row(inp, 2, "Mapping (config):", self.mapping_var,
                        lambda: self._browse_into(self.mapping_var, "JSON", "*.json"))
         self._file_row(inp, 3, "RET template (.txt):", self.txt_template_var,
@@ -225,7 +227,7 @@ class App(tk.Tk):
         if not (self.cdd_var.get() and self.sheet_var.get() and os.path.exists(self.mapping_var.get())):
             return
         try:
-            mapping = ret_core.load_mapping(self.mapping_var.get())
+            mapping = self._load_mapping()
             clusters = ret_core.list_bbu_clusters(self.cdd_var.get(), self.sheet_var.get(), mapping)
         except Exception as e:
             self.status_var.set(f"Could not read BBU Clusters: {e}")
@@ -253,15 +255,41 @@ class App(tk.Tk):
         self.sheet_var.set(preferred if preferred in sheets else (sheets[0] if sheets else ""))
         self._load_clusters()
 
+    # ---------- mapping ----------
+    def _load_mapping(self):
+        """Load the selected mapping.json; if it is not a NewRET mapping,
+        fall back to the bundled copy so an old/incompatible file next to the
+        EXE doesn't break generation."""
+        path = self.mapping_var.get()
+        if not os.path.exists(path):
+            raise ValueError("Mapping file not found.")
+        mapping = ret_core.load_mapping(path)
+        if not ret_core.mapping_problems(mapping):
+            return mapping
+        # Selected mapping is not NewRET format — try the bundled copy.
+        for base in (BUNDLE_DIR, APP_DIR):
+            fallback = os.path.join(base, "mapping.json")
+            if os.path.abspath(fallback) == os.path.abspath(path):
+                continue
+            if os.path.exists(fallback):
+                cand = ret_core.load_mapping(fallback)
+                if not ret_core.mapping_problems(cand):
+                    self.status_var.set(
+                        "Selected mapping.json is not a NewRET mapping — using the "
+                        "bundled mapping.json instead."
+                    )
+                    return cand
+        # No valid fallback available: raise the clear error.
+        ret_core._require_mapping_keys(mapping)  # noqa: SLF001
+        return mapping  # unreachable
+
     # ---------- xlsx actions ----------
     def _gather(self):
         if not self.cdd_var.get() or not os.path.exists(self.cdd_var.get()):
             raise ValueError("Please select a valid CDD file.")
         if not self.sheet_var.get():
             raise ValueError("Please select a sheet.")
-        if not os.path.exists(self.mapping_var.get()):
-            raise ValueError("Mapping file not found.")
-        mapping = ret_core.load_mapping(self.mapping_var.get())
+        mapping = self._load_mapping()
         rows, skipped, sectors, _ = ret_core.build_rows(
             self.cdd_var.get(), self.sheet_var.get(), mapping, clusters=self._selected_clusters()
         )
@@ -320,9 +348,7 @@ class App(tk.Tk):
             raise ValueError("Select a valid CDD file on the first tab.")
         if not self.sheet_var.get():
             raise ValueError("Select a sheet on the first tab.")
-        if not os.path.exists(self.mapping_var.get()):
-            raise ValueError("Mapping file not found (first tab).")
-        mapping = ret_core.load_mapping(self.mapping_var.get())
+        mapping = self._load_mapping()
         text, warnings = ret_core.build_text_output(
             self.txt_template_var.get(), self.txt_input_var.get(),
             self.cdd_var.get(), self.sheet_var.get(), mapping,
@@ -384,6 +410,21 @@ class App(tk.Tk):
         if path:
             self.cdd_var.set(path)
             self._load_sheets()
+
+    def _reload_cdd(self):
+        """Re-read the currently selected CDD from disk (sheets + clusters).
+
+        Use after the CDD file changed on disk or its path was edited without
+        the Browse dialog, so the MML output doesn't reflect stale data."""
+        path = self.cdd_var.get()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Reload CDD", "Select a valid CDD file first.")
+            return
+        current_sheet = self.sheet_var.get()
+        self._load_sheets()
+        if current_sheet in (self.text_sheet_combo["values"] or ()):
+            self.sheet_var.set(current_sheet)
+        self.txt_status_var.set(f"Reloaded CDD: {os.path.basename(path)}")
 
     def _browse_into(self, var, label, pattern):
         path = filedialog.askopenfilename(filetypes=[(label, pattern), ("All files", "*.*")])

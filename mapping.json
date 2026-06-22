@@ -98,6 +98,11 @@
   },
   "text_config": {
     "description": "RET_template.txt -> RET_output.txt (ADD RET / MOD RETTILT MML). DEVICENAME prefix, SERIALNO and TILT are rewritten from RET_input.txt + the CDD-derived rows.",
+    "site_match": {
+      "field": "ne_name",
+      "include_ne_id": false,
+      "note": "'field' is the 4G CDD column the RET-input site name (line 1) is matched against to find the CDD sector, AND which supplies the SITE token of the rewritten DEVICENAME prefix: 'ne_name' = NEName_New (default, e.g. HNIPTH01_LN); 'site_new' = SiteName (RRU Location)_New (e.g. HNIPTH01). 'include_ne_id' appends _{Ne ID} to that token; false to match templates whose DEVICENAME is {site}_{band}_{sector}_{slot} with no Ne ID."
+    },
     "input": {
       "_note": "RET_input.txt: line 1 = site name (== CDD SiteName_New); remaining lines are whitespace/tab separated. Indices are 0-based after splitting.",
       "site_line": 0,
@@ -106,13 +111,13 @@
       "serial_suffix_len": 3
     },
     "template": {
-      "_note": "prefix_token_count = number of leading underscore tokens in DEVICENAME forming the site prefix (site + Ne ID) that get replaced; the band/sector/slot suffix is kept.",
-      "prefix_token_count": 2,
+      "_note": "prefix_token_count = number of leading underscore tokens of DEVICENAME (the site prefix) that get replaced; the band/sector/slot suffix is kept. The template DEVICENAME is {site}_{band}_{sector}_{slot} (no Ne ID), so only the 1 leading site token is replaced.",
+      "prefix_token_count": 1,
       "add_line_prefix": "ADD RET",
       "tilt_line_prefix": "MOD RETTILT"
     },
     "rules": {
-      "devicename": "Replace the leading {prefix_token_count} tokens of DEVICENAME with {SiteName_New}_{Ne ID}; keep the band/sector/slot suffix from the template.",
+      "devicename": "Replace the leading {prefix_token_count} token(s) of DEVICENAME with the site_match prefix (NEName_New by default, no Ne ID); keep the band/sector/slot suffix from the template.",
       "serialno": "Replace SERIALNO with the input serial whose (CTRLSRN, RIGHT(serial, serial_suffix_len)) matches the template line's (CTRLSRN, RIGHT(SERIALNO, serial_suffix_len)).",
       "tilt": "MOD RETTILT TILT = the RCU Tilt of the ADD RET device with the same DEVICENO, matched positionally: CTRLSRN -> sector_id, plus the device's order within that sector (1st..4th) -> that sector's device RCU Tilt."
     }

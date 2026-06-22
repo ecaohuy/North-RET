@@ -31,9 +31,14 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   names (e.g. dashed `VNP-4G-…`) skip.
 - New feature: **BBU Cluster filter**. The GUI multi-selects distinct
   `BBU Cluster` values; only those sectors are emitted (none = all).
-- MML feature keeps the old behaviour: DEVICENAME prefix →
-  `{SiteName_New}_{Ne ID}` (prefix_token_count=2), so the MML template's
-  `{site}_{neid}_…` names are rewritten and tilts matched positionally.
+- MML feature: only the leading site token of DEVICENAME is rewritten
+  (`prefix_token_count=1`); the `{band}_{sector}_{slot}` suffix is kept
+  verbatim, so the output looks like the template (no Ne ID). The RET input
+  line 1 is matched against `text_config.site_match.field` — the same field
+  that supplies the rewritten site token (`ne_name` = NEName_New by default,
+  e.g. `HNIPTH01_LN`; `site_new` = SiteName_New, e.g. `HNIPTH01`).
+  `site_match.include_ne_id` (default false) appends `_{Ne ID}` to that token
+  when a template needs it.
 
 ## Design rules (inherited from ../01.RET — must follow)
 
