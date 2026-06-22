@@ -34,6 +34,28 @@ def load_mapping(path):
         return json.load(f)
 
 
+def _require_mapping_keys(mapping):
+    """Validate that the mapping.json is the NewRET format, with a clear error.
+
+    The GUI lets the user Browse to any mapping.json; pointing it at the older
+    ../01.RET mapping (which has no ``devices``/``constants``) used to crash with
+    a bare ``KeyError: 'devices'``. Surface an actionable message instead.
+    """
+    problems = []
+    if not isinstance(mapping.get("devices"), list) or not mapping.get("devices"):
+        problems.append('"devices" (the list of 4 RET devices per sector)')
+    consts = mapping.get("constants")
+    if not isinstance(consts, dict) or "rru_cn" not in consts or "rru_sn" not in consts:
+        problems.append('"constants" with "rru_cn" and "rru_sn"')
+    if problems:
+        raise ValueError(
+            "This mapping.json is not a NewRET mapping — it is missing: "
+            + "; ".join(problems)
+            + ".\nSelect the NewRET mapping.json (the one bundled with this app), "
+            "not the mapping.json from the older RET project."
+        )
+
+
 def _norm_header(s):
     """Normalize a header cell for tolerant matching (case/whitespace-insensitive)."""
     if s is None:
@@ -165,6 +187,7 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
       site_index   = {site_new: {"prefix": ..., "tilts": {(sector_id, pos): tilt}}}
                      for the MML text feature.
     """
+    _require_mapping_keys(mapping)
     devices = mapping["devices"]
     rru_cn = mapping["constants"]["rru_cn"]
     rru_sn = mapping["constants"]["rru_sn"]
