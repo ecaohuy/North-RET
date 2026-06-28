@@ -130,6 +130,26 @@ def resolve_sector(Y, mapping, offset=0):
     return f"S{n}", base + (n - 1)
 
 
+def resolve_row_sector(Y, lsid, offset, mapping):
+    """Resolve a CDD row to (sector_id, rru_srn), honouring the digit exception.
+
+    Per mapping.json -> sector_rule.digit_from_logical_sector_id: when
+    RIGHT(CellName, 1) (=Y) is a DIGIT, the letter/co-located-offset rule does
+    not apply; the sector is taken from RIGHT(Logical Sector ID (Site), 1)
+    instead (e.g. LSID '3.1' -> S1, '3.2' -> S2, '3' -> S3), with no offset.
+    Falls back to the plain digit-of-CellName rule when the LSID is unusable.
+    Otherwise (letter Y) defers to ``resolve_sector`` with ``offset``.
+    """
+    rule = mapping.get("sector_rule", {})
+    Y = str(Y).strip()
+    if rule.get("digit_from_logical_sector_id", True) and Y.isdigit():
+        if lsid not in (None, ""):
+            last = str(lsid).strip()[-1:]
+            if last.isdigit():
+                return resolve_sector(last, mapping, 0)
+    return resolve_sector(Y, mapping, offset)
+
+
 def list_sheets(cdd_path):
     """Return sheet names in the CDD workbook."""
     wb = load_workbook(cdd_path, read_only=True)
@@ -149,6 +169,8 @@ def _resolve_columns(all_rows, mapping):
         "cell_name": hdr_cfg.get("cell_name", "CellName (New)[Key]"),
         "e_tilt": hdr_cfg.get("e_tilt", "E_TILT"),
         "bbu_cluster": hdr_cfg.get("bbu_cluster", "BBU Cluster"),
+        "site_type": hdr_cfg.get("site_type", "Site Type"),
+        "logical_sector_id": hdr_cfg.get("logical_sector_id", "Logical Sector ID (Site)"),
     }
     hdr_idx, norm = _locate_header(all_rows, [_norm_header(wanted["cell_name"])])
     col = {f: _find_index(norm, [_norm_header(name)]) for f, name in wanted.items()}
@@ -207,6 +229,10 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     match_len = sector_rule.get("match_prefix_len", 8)
     colocated_offset = sector_rule.get("colocated_offset", 3)
     cluster_filter = {str(c).strip() for c in clusters} if clusters else None
+    # Row filter: drop rows whose Site Type is one of skip_values (case-insensitive,
+    # exact). Default skips a standalone "IBC" (but not "Macro+IBC", "CRAN-IBC", ...).
+    site_type_cfg = mapping.get("row_filters", {}).get("site_type", {})
+    site_type_skip = {str(v).strip().lower() for v in site_type_cfg.get("skip_values", [])}
     # RET MML only: which CDD field the RET input line 1 is matched against AND
     # which supplies the SITE token of the rewritten DEVICENAME prefix. "ne_name"
     # = NEName_New (default), "site_new" = SiteName_New.
@@ -243,6 +269,7 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     sector_ne_id = {}               # (site_new, Y) -> Ne ID (first non-blank)
     sector_ne_name = {}             # (site_new, Y) -> NEName_New (first non-blank)
     sector_offset = {}              # (site_new, Y) -> 0 (own site) or colocated_offset
+    sector_lsid = {}                # (site_new, Y) -> Logical Sector ID (first non-blank)
     sector_order = []
     seen = set()
     skipped = []
@@ -259,6 +286,13 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
         if not site_new:
             skipped.append((cell, "blank SiteName_New"))
             continue
+        # Site Type filter: e.g. a standalone "IBC" is ignored entirely.
+        if site_type_skip:
+            st = _get(r, "site_type")
+            st = str(st).strip().lower() if st is not None else ""
+            if st in site_type_skip:
+                skipped.append((cell, f"Site Type={st or '(blank)'} (filtered)"))
+                continue
         # BBU Cluster filter (when a selection is active).
         if cluster_filter is not None:
             bbu = _get(r, "bbu_cluster")
@@ -274,7 +308,10 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
         ne_name_val = str(ne_name_val).strip() if ne_name_val is not None else ""
         is_own = ne_name_val[:match_len].upper() == cell[:match_len].upper()
         offset = 0 if is_own else colocated_offset
-        if resolve_sector(Y, mapping, offset) is None:
+        # When RIGHT(CellName,1) is a digit, the sector comes from the Logical
+        # Sector ID (Site) instead of the letter/offset rule (see resolve_row_sector).
+        lsid_val = _get(r, "logical_sector_id")
+        if resolve_row_sector(Y, lsid_val, offset, mapping) is None:
             skipped.append((cell, f"unknown sector Y={Y}"))
             continue
         key = (site_new, Y)
@@ -282,6 +319,8 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
             seen.add(key)
             sector_order.append(key)
             sector_offset[key] = offset
+        if lsid_val not in (None, "") and key not in sector_lsid:
+            sector_lsid[key] = lsid_val
         ne_id = _get(r, "ne_id")
         if ne_id not in (None, "") and key not in sector_ne_id:
             sector_ne_id[key] = ne_id
@@ -297,7 +336,8 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     site_index = {}
     for key in sector_order:
         site_new, Y = key
-        sector_id, rru_srn = resolve_sector(Y, mapping, sector_offset.get(key, 0))
+        sector_id, rru_srn = resolve_row_sector(
+            Y, sector_lsid.get(key), sector_offset.get(key, 0), mapping)
         present = by_sector[key]            # {X: e_tilt} for this sector
         ne_id = sector_ne_id.get(key, "")
         # Site Name(*) = NEName_New (fallback to SiteName_New if blank).

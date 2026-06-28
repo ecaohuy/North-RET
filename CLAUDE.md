@@ -29,6 +29,14 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   site and keeps n; otherwise it is a co-located neighbour and gets
   `+colocated_offset` (default 3: S1→S4, S2→S5, S3→S6). Non-conforming
   names (e.g. dashed `VNP-4G-…`) skip.
+  **Digit exception** (`sector_rule.digit_from_logical_sector_id`): when
+  `RIGHT(CellName,1)` is a **digit**, the letter/offset rule does NOT apply;
+  the sector is `RIGHT(Logical Sector ID (Site), 1)` instead (LSID `3.1`→S1,
+  `3.2`→S2, `3`→S3; no co-located offset). These rows used to be dropped.
+- **Site Type filter** (`row_filters.site_type`): rows whose
+  `Site Type(IBC/Macro/…)` equals (case-insensitive, exact) a `skip_values`
+  entry are ignored entirely. Default skips a standalone `IBC` — but NOT
+  `Macro+IBC`, `CRAN-IBC`, etc. (exact match).
 - New feature: **BBU Cluster filter**. The GUI multi-selects distinct
   `BBU Cluster` values; only those sectors are emitted (none = all).
 - MML feature: only the leading site token of DEVICENAME is rewritten

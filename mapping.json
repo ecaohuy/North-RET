@@ -11,7 +11,16 @@
       "ne_id": "Ne ID (New)",
       "cell_name": "CellName (New)[Key]",
       "e_tilt": "E_TILT",
-      "bbu_cluster": "BBU Cluster"
+      "bbu_cluster": "BBU Cluster",
+      "site_type": "Site Type(IBC/Macro/Macro+IBC/CRAN-M/CRAN-R/CRAN-IBC)",
+      "logical_sector_id": "Logical Sector ID (Site)"
+    }
+  },
+  "row_filters": {
+    "site_type": {
+      "header": "Site Type(IBC/Macro/Macro+IBC/CRAN-M/CRAN-R/CRAN-IBC)",
+      "skip_values": ["IBC"],
+      "note": "Rows whose Site Type equals (case-insensitive, exact) one of skip_values are ignored entirely — nothing is emitted for them. Exact match, so 'Macro+IBC', 'CRAN-IBC', 'CRAN-R+IBC' etc. are NOT skipped; only a standalone 'IBC'."
     }
   },
   "extraction": {
@@ -38,7 +47,8 @@
     "max_sectors": 9,
     "colocated_offset": 3,
     "match_prefix_len": 8,
-    "note": "Y (last char of CellName) -> base sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). A co-located offset is then added: if LEFT(NEName_New, match_prefix_len) == LEFT(CellName, match_prefix_len) the cell is the NE's OWN site and keeps its base number (S1,S2,S3,...); otherwise it is a co-located neighbour and gets +colocated_offset (S1->S4, S2->S5, S3->S6). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). NOTE: match_prefix_len is 8 (the site code length); char 9 of NEName_New is the '_'/'-' separator, so a length of 9 never matches. Anything outside 1..max_sectors (e.g. 'M', 'X', dashed VNP names) is skipped."
+    "digit_from_logical_sector_id": true,
+    "note": "Y (last char of CellName) -> base sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). A co-located offset is then added: if LEFT(NEName_New, match_prefix_len) == LEFT(CellName, match_prefix_len) the cell is the NE's OWN site and keeps its base number (S1,S2,S3,...); otherwise it is a co-located neighbour and gets +colocated_offset (S1->S4, S2->S5, S3->S6). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). NOTE: match_prefix_len is 8 (the site code length); char 9 of NEName_New is the '_'/'-' separator, so a length of 9 never matches. Anything outside 1..max_sectors (e.g. 'M', 'X', dashed VNP names) is skipped. EXCEPTION (digit_from_logical_sector_id): when RIGHT(CellName,1) is a DIGIT, the letter/offset rule does NOT apply; the sector is taken from RIGHT(Logical Sector ID (Site), 1) instead — e.g. LSID '3.1' -> S1, '3.2' -> S2, '3' -> S3 (last char of the LSID = sector number n; rru_srn = srn_base + (n-1); no co-located offset). Falls back to the digit-of-CellName rule only if the Logical Sector ID is blank/unusable."
   },
   "devices": [
     { "name": "Lb1",  "color": "Lb1",  "band_token": "L1800",      "slot_suffix": "_1", "tilt_band": "C", "tilt_fallback": "D" },
