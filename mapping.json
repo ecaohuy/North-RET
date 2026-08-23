@@ -124,12 +124,13 @@
       "_note": "prefix_token_count = number of leading underscore tokens of DEVICENAME (the site prefix) that get replaced; the band/sector/slot suffix is kept. The template DEVICENAME is {site}_{band}_{sector}_{slot} (no Ne ID), so only the 1 leading site token is replaced.",
       "prefix_token_count": 1,
       "add_line_prefix": "ADD RET",
-      "tilt_line_prefix": "MOD RETTILT"
+      "tilt_line_prefix": ["MOD RETTILT", "MOD RETSUBUNIT"],
+      "_tilt_note": "May be a single string or a list. A Huawei RET template can carry the tilt on MOD RETTILT, on MOD RETSUBUNIT, or on both; every listed verb has its TILT= rewritten, so no tilt line is left holding the template site's values."
     },
     "rules": {
       "devicename": "Replace the leading {prefix_token_count} token(s) of DEVICENAME with the site_match prefix (NEName_New by default, no Ne ID); keep the band/sector/slot suffix from the template.",
       "serialno": "Replace SERIALNO with the input serial whose (CTRLSRN, RIGHT(serial, serial_suffix_len)) matches the template line's (CTRLSRN, RIGHT(SERIALNO, serial_suffix_len)).",
-      "tilt": "MOD RETTILT TILT = the RCU Tilt of the ADD RET device with the same DEVICENO, matched positionally: CTRLSRN -> sector_id, plus the device's order within that sector (1st..4th) -> that sector's device RCU Tilt."
+      "tilt": "Each tilt line's TILT = the RCU Tilt of the ADD RET device with the same DEVICENO. That device is identified from its DEVICENAME suffix ({band_token}_{sector}{slot_suffix} -> sector + which of devices[] it is), so the tilt follows the device even if the ADD RET lines are reordered or a sector is short of devices; CTRLSRN -> sector plus order-of-appearance is only the fallback when the DEVICENAME cannot be parsed."
     }
   }
 }

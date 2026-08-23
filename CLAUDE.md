@@ -39,6 +39,13 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   `Macro+IBC`, `CRAN-IBC`, etc. (exact match).
 - New feature: **BBU Cluster filter**. The GUI multi-selects distinct
   `BBU Cluster` values; only those sectors are emitted (none = all).
+- **Reading the CDD is not done with openpyxl.** `fast_xlsx.py` pulls only the
+  ~8 mapped columns out of the sheet XML (~1.5 s for the 22 MB / 15 700-row
+  production CDD, vs ~11 s for `openpyxl.iter_rows`), and `ret_core.read_cdd`
+  memoises the parse per (path, mtime, size, sheet, header names) so repeat
+  Preview/Generate clicks are instant. Anything unexpected in a workbook falls
+  back to `_read_cdd_openpyxl`, which must stay byte-identical in output.
+  `clear_cdd_cache()` backs the GUI's "Reload CDD".
 - MML feature: only the leading site token of DEVICENAME is rewritten
   (`prefix_token_count=1`); the `{band}_{sector}_{slot}` suffix is kept
   verbatim, so the output looks like the template (no Ne ID). The RET input
@@ -46,7 +53,25 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   that supplies the rewritten site token (`ne_name` = NEName_New by default,
   e.g. `HNIPTH01_LN`; `site_new` = SiteName_New, e.g. `HNIPTH01`).
   `site_match.include_ne_id` (default false) appends `_{Ne ID}` to that token
-  when a template needs it.
+  when a template needs it. The site name is matched case-insensitively and,
+  failing that, on the bare site code (`HNIVTH16` finds `HNIVTH16_LN`); an
+  ambiguous short form is reported, never guessed.
+- MML tilts are matched **by device identity, not line order**: the template
+  DEVICENAME suffix (`{band_token}_{sector}{slot_suffix}`) is read back into
+  (sector, which of `devices[]`), and CTRLSRN + order-of-appearance is only the
+  fallback. `text_config.template.tilt_line_prefix` may be a list — it defaults
+  to `["MOD RETTILT", "MOD RETSUBUNIT"]`, because a template carrying its tilt
+  on the verb that isn't rewritten silently keeps the *template site's* tilts.
+- `build_text_output` returns `(text, warnings, report)`; `report` is one record
+  per ADD RET device (sector, device #, tilt, serial, how it matched) and is
+  what the GUI's "Device map" tab shows. Warnings also call out unused input
+  serials and sectors claimed twice.
+- **Known open issue**: a site whose Logical Sector IDs are `1.1/1.2/2.1/2.2`
+  resolves two CellName groups onto the same sector (S1, S2) — see
+  `HNIVTH16_LN`. 223 of 2811 sites in the current CDD are affected. The first
+  group wins and a warning is raised; the correct rule is still undecided.
+  Unrelated to sector *count*: 165 sites legitimately have 6 sectors (own S1-S3
+  plus a co-located neighbour at +3), 3 have 7, and those resolve cleanly.
 
 ## Design rules (inherited from ../01.RET — must follow)
 

@@ -10,11 +10,14 @@ Band (X) and sector (Y) come straight from CellName (New)[Key]:
 All transformation rules live in mapping.json; styling comes from the template.
 """
 import json
+import os
 import re
 from collections import defaultdict
 from copy import copy
 
 from openpyxl import load_workbook
+
+import fast_xlsx
 
 # Output column headers (target order), same 8 columns as the WDT Internal sheet.
 HEADERS = [
@@ -152,17 +155,21 @@ def resolve_row_sector(Y, lsid, offset, mapping):
 
 def list_sheets(cdd_path):
     """Return sheet names in the CDD workbook."""
-    wb = load_workbook(cdd_path, read_only=True)
     try:
-        return wb.sheetnames
-    finally:
-        wb.close()
+        with fast_xlsx.Workbook(cdd_path) as wb:
+            return list(wb.sheets)
+    except Exception:
+        wb = load_workbook(cdd_path, read_only=True)
+        try:
+            return wb.sheetnames
+        finally:
+            wb.close()
 
 
-def _resolve_columns(all_rows, mapping):
-    """Locate CDD columns by header name. Returns (header_row_index, col_map)."""
+def _wanted_headers(mapping):
+    """The CDD header name expected for each field, from mapping.json."""
     hdr_cfg = mapping.get("source", {}).get("headers", {})
-    wanted = {
+    return {
         "site_new": hdr_cfg.get("site_new", "SiteName (RRU Location)_New"),
         "ne_name": hdr_cfg.get("ne_name", "NEName_New"),
         "ne_id": hdr_cfg.get("ne_id", "Ne ID (New)"),
@@ -172,31 +179,137 @@ def _resolve_columns(all_rows, mapping):
         "site_type": hdr_cfg.get("site_type", "Site Type"),
         "logical_sector_id": hdr_cfg.get("logical_sector_id", "Logical Sector ID (Site)"),
     }
+
+
+def _resolve_columns(all_rows, mapping):
+    """Locate CDD columns by header name. Returns (header_row_index, col_map, wanted)."""
+    wanted = _wanted_headers(mapping)
     hdr_idx, norm = _locate_header(all_rows, [_norm_header(wanted["cell_name"])])
     col = {f: _find_index(norm, [_norm_header(name)]) for f, name in wanted.items()}
     return hdr_idx, col, wanted
 
 
-def list_bbu_clusters(cdd_path, sheet, mapping):
-    """Return the sorted distinct BBU Cluster values present in the sheet."""
+# --------------------------------------------------------------------------
+# CDD reading.
+#
+# The production CDD is ~22 MB / 15 700 rows x 106 columns and openpyxl needs
+# ~9 s to materialise it, which used to be paid on every Preview/Generate.
+# ``read_cdd`` instead pulls only the ~8 mapped columns straight out of the
+# sheet XML (fast_xlsx, ~0.5 s) and memoises the result per (file, mtime,
+# size, sheet, header names), so repeat runs are instant. Any surprise in the
+# workbook falls back to the original openpyxl path.
+# --------------------------------------------------------------------------
+
+_CDD_CACHE = {}          # cache key -> (hdr_idx, col, wanted, records)
+_CDD_CACHE_MAX = 3       # keep a couple of workbooks, not every one ever opened
+
+
+class CDDData:
+    """Parsed CDD sheet: mapped columns only, one dict of values per data row."""
+
+    __slots__ = ("hdr_idx", "col", "wanted", "records", "header_names")
+
+    def __init__(self, hdr_idx, col, wanted, records, header_names):
+        self.hdr_idx = hdr_idx
+        self.col = col
+        self.wanted = wanted
+        self.records = records
+        self.header_names = header_names
+
+    def missing(self, fields):
+        """Header names of ``fields`` that were not found in the sheet."""
+        return [self.wanted[f] for f in fields if self.col.get(f) is None]
+
+
+def _records_from_rows(all_rows, hdr_idx, col):
+    """Generic reader path: full row tuples -> per-row {field: value} dicts."""
+    fields = [(f, j) for f, j in col.items() if j is not None]
+    records = []
+    for r in all_rows[hdr_idx + 1:]:
+        if not r:
+            continue
+        rec = {}
+        for f, j in fields:
+            v = r[j] if len(r) > j else None
+            if v is not None and v != "":
+                rec[f] = v
+        if rec:
+            records.append(rec)
+    return records
+
+
+def _read_cdd_fast(cdd_path, sheet, mapping):
+    with fast_xlsx.Workbook(cdd_path) as wb:
+        if sheet not in wb.sheets:
+            raise KeyError(sheet)
+        head = wb.head_rows(sheet, 10)
+        if not any(head):
+            # Nothing decoded at all -> the sheet XML is not shaped the way this
+            # reader expects; let the caller fall back to openpyxl.
+            raise ValueError("fast reader decoded no header cells")
+        hdr_idx, col, wanted = _resolve_columns(head, mapping)
+        header_names = [str(h) for h in head[hdr_idx] if h is not None]
+        if col.get("cell_name") is None:
+            # Header genuinely absent (e.g. the 5G sheet). Return the empty
+            # column map so build_rows can report it immediately.
+            return CDDData(hdr_idx, col, wanted, [], header_names)
+        indices = [j for j in col.values() if j is not None]
+        raw = wb.read_columns(sheet, indices, skip_rows=hdr_idx + 1)
+    by_index = {j: f for f, j in col.items() if j is not None}
+    records = [{by_index[j]: v for j, v in row.items() if j in by_index} for row in raw]
+    return CDDData(hdr_idx, col, wanted, [r for r in records if r], header_names)
+
+
+def _read_cdd_openpyxl(cdd_path, sheet, mapping):
     wb = load_workbook(cdd_path, data_only=True, read_only=True)
     try:
         ws = wb[sheet]
         all_rows = list(ws.iter_rows(min_row=1, values_only=True))
     finally:
         wb.close()
-    if not all_rows:
-        return []
-    hdr_idx, col, _ = _resolve_columns(all_rows, mapping)
-    j = col.get("bbu_cluster")
-    cj = col.get("cell_name")
-    if j is None:
+    hdr_idx, col, wanted = _resolve_columns(all_rows, mapping)
+    header_names = [str(h) for h in (all_rows[hdr_idx] if all_rows else ()) if h is not None]
+    return CDDData(hdr_idx, col, wanted, _records_from_rows(all_rows, hdr_idx, col),
+                   header_names)
+
+
+def read_cdd(cdd_path, sheet, mapping):
+    """Return the ``CDDData`` for ``sheet``, memoised on the file's mtime/size."""
+    wanted = _wanted_headers(mapping)
+    try:
+        st = os.stat(cdd_path)
+        key = (os.path.abspath(cdd_path), st.st_mtime_ns, st.st_size, sheet,
+               tuple(sorted(wanted.items())))
+    except OSError:
+        key = None
+    if key is not None and key in _CDD_CACHE:
+        return _CDD_CACHE[key]
+    try:
+        data = _read_cdd_fast(cdd_path, sheet, mapping)
+    except Exception:
+        data = _read_cdd_openpyxl(cdd_path, sheet, mapping)
+    if key is not None:
+        if len(_CDD_CACHE) >= _CDD_CACHE_MAX:
+            _CDD_CACHE.pop(next(iter(_CDD_CACHE)))
+        _CDD_CACHE[key] = data
+    return data
+
+
+def clear_cdd_cache():
+    """Drop memoised CDD parses (used by the GUI's 'Reload CDD')."""
+    _CDD_CACHE.clear()
+
+
+def list_bbu_clusters(cdd_path, sheet, mapping):
+    """Return the sorted distinct BBU Cluster values present in the sheet."""
+    data = read_cdd(cdd_path, sheet, mapping)
+    if data.col.get("bbu_cluster") is None:
         return []
     found = set()
-    for r in all_rows[hdr_idx + 1:]:
-        if not r or (cj is not None and (len(r) <= cj or r[cj] is None)):
+    for rec in data.records:
+        if "cell_name" not in rec:
             continue
-        v = r[j] if len(r) > j else None
+        v = rec.get("bbu_cluster")
         if v not in (None, ""):
             found.add(str(v).strip())
     return sorted(found)
@@ -242,28 +355,18 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     # {site}_{band}_{sector}_{slot} (no Ne ID) set this false.
     include_ne_id = site_match.get("include_ne_id", False)
 
-    wb = load_workbook(cdd_path, data_only=True, read_only=True)
-    try:
-        ws = wb[sheet]
-        all_rows = list(ws.iter_rows(min_row=1, values_only=True))
-    finally:
-        wb.close()
-
-    hdr_idx, col, wanted = _resolve_columns(all_rows, mapping)
-    required = ("site_new", "cell_name")
-    missing = [wanted[f] for f in required if col[f] is None]
+    data = read_cdd(cdd_path, sheet, mapping)
+    missing = data.missing(("site_new", "cell_name"))
     if missing:
-        found = [str(h) for h in (all_rows[hdr_idx] if all_rows else ()) if h is not None]
         raise ValueError(
             "Sheet '%s': could not find required column(s) by header name: %s.\n"
             "Headers found in the sheet:\n  %s\n"
             "Check mapping.json -> source.headers."
-            % (sheet, ", ".join('"%s"' % m for m in missing), "\n  ".join(found))
+            % (sheet, ", ".join('"%s"' % m for m in missing), "\n  ".join(data.header_names))
         )
 
     def _get(r, field):
-        j = col[field]
-        return r[j] if (j is not None and len(r) > j) else None
+        return r.get(field)
 
     by_sector = defaultdict(dict)   # (site_new, Y) -> {X: e_tilt}
     sector_ne_id = {}               # (site_new, Y) -> Ne ID (first non-blank)
@@ -274,8 +377,8 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     seen = set()
     skipped = []
 
-    for r in all_rows[hdr_idx + 1:]:
-        if not r or _get(r, "cell_name") is None:
+    for r in data.records:
+        if _get(r, "cell_name") is None:
             continue
         cell = str(_get(r, "cell_name")).strip()
         if len(cell) < 2:
@@ -353,8 +456,18 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
         prefix_site = site_name if site_match_field == "ne_name" else site_new
         prefix = f"{prefix_site}_{ne_id}".rstrip("_") if include_ne_id else str(prefix_site)
         site_entry = site_index.setdefault(
-            prefix_site, {"prefix": prefix, "tilts": {}}
+            prefix_site, {"prefix": prefix, "tilts": {}, "conflicts": {}}
         )
+        # Two CellName groups of one site can resolve to the SAME sector (e.g.
+        # a site whose Logical Sector IDs are 1.1/1.2/2.1/2.2 -> S1,S2,S1,S2).
+        # Record it instead of letting the later group silently overwrite the
+        # earlier one's tilts; the MML step surfaces it as a warning.
+        claimed = site_entry.setdefault("sectors", {})
+        prior_y = claimed.get(sector_id)
+        if prior_y is None:
+            claimed[sector_id] = Y
+        elif prior_y != Y:
+            site_entry["conflicts"].setdefault(sector_id, [prior_y]).append(Y)
 
         for pos, dev in enumerate(devices):
             t = present.get(dev["tilt_band"])
@@ -362,7 +475,9 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
                 t = present.get(dev.get("tilt_fallback"))
             rcu_tilt = round((t or 0.0) * 10)
             rru_name = f"{rru_prefix}_{dev['band_token']}_{sector_id}{dev['slot_suffix']}"
-            site_entry["tilts"][(sector_id, pos)] = rcu_tilt
+            # First CellName group to claim a sector wins, so a later colliding
+            # group cannot silently replace its tilts (see "conflicts" above).
+            site_entry["tilts"].setdefault((sector_id, pos), rcu_tilt)
             rows.append([
                 site_name,
                 rru_name,
@@ -499,27 +614,104 @@ def parse_ret_input_text(text, mapping, source="pasted input"):
     return site, serials
 
 
+def _site_entry(site_index, site):
+    """Return the build_rows site entry for ``site``, matched tolerantly.
+
+    The RET input's line 1 is typed/pasted by hand, so match case-insensitively
+    and — failing that — on the bare site code (the part before the first '_'
+    or '-'), which is what distinguishes 'HNIVTH16', 'HNIVTH16_LN' and
+    'hnivth16_ln'. An ambiguous short form is reported rather than guessed.
+    """
+    entry = site_index.get(site)
+    if entry is not None:
+        return entry
+
+    def _code(s):
+        return re.split(r"[_-]", str(s).strip(), 1)[0].upper()
+
+    want = str(site).strip().upper()
+    ci = [k for k in site_index if k.upper() == want]
+    if len(ci) == 1:
+        return site_index[ci[0]]
+    by_code = [k for k in site_index if _code(k) == _code(site)]
+    if len(by_code) == 1:
+        return site_index[by_code[0]]
+    if len(by_code) > 1:
+        raise ValueError(
+            "Site %r (from the RET input) matches %d CDD sites: %s.\n"
+            "Use the full NEName_New so the right one can be picked."
+            % (site, len(by_code), ", ".join(sorted(by_code)))
+        )
+    near = sorted(k for k in site_index if _code(k).startswith(_code(site)[:6]))
+    hint = ("\nDid you mean: %s" % ", ".join(near[:10])) if near else (
+        "\n%d sites are available in this CDD/cluster selection." % len(site_index))
+    raise ValueError(
+        "Site %r (from the RET input) was not found in the CDD output.%s" % (site, hint)
+    )
+
+
 def _site_tilt_index(site_index, site):
     """Return (new_prefix, tilt_by_sector_pos) for ``site`` from build_rows."""
-    entry = site_index.get(site)
-    if entry is None:
-        available = ", ".join(sorted(site_index))
-        raise ValueError(
-            "Site %r (from RET input) was not found in the CDD output.\n"
-            "Sites available in the CDD: %s" % (site, available)
-        )
+    entry = _site_entry(site_index, site)
     return entry["prefix"], entry["tilts"]
+
+
+def _device_signatures(mapping):
+    """[(band_token, slot_suffix, position)] longest band_token first.
+
+    Used to read a template DEVICENAME suffix ('NSN_L1800_S1_1') back into the
+    device it names, so a tilt is matched by *identity* rather than by the order
+    the ADD RET lines happen to appear in.
+    """
+    sigs = []
+    for pos, dev in enumerate(mapping.get("devices", [])):
+        sigs.append((str(dev.get("band_token", "")), str(dev.get("slot_suffix", "")), pos))
+    sigs.sort(key=lambda s: len(s[0]), reverse=True)
+    return sigs
+
+
+def _parse_devicename(suffix, sigs):
+    """DEVICENAME suffix -> (sector_id, device position), or (None, None).
+
+    ``suffix`` is the DEVICENAME with the leading site token(s) removed, e.g.
+    'NSN_L1800_S1_1' -> ('S1', 2).
+    """
+    for band, slot, pos in sigs:
+        head, tail = band + "_", slot
+        if band and suffix.startswith(head) and (not tail or suffix.endswith(tail)):
+            sector = suffix[len(head):len(suffix) - len(tail)]
+            if sector:
+                return sector, pos
+    return None, None
+
+
+def _tilt_line_prefixes(tcfg):
+    """The MML verbs whose TILT= is rewritten.
+
+    Accepts ``tilt_line_prefix`` as a string or a list; a Huawei template may
+    carry the tilt on ``MOD RETTILT`` or on ``MOD RETSUBUNIT`` (or both), and
+    only rewriting one of them silently leaves the other at the template's
+    values, which is the worst possible failure — a plausible-looking script
+    with somebody else's tilts.
+    """
+    raw = tcfg.get("tilt_line_prefix", tcfg.get("tilt_line_prefixes",
+                                                ["MOD RETTILT", "MOD RETSUBUNIT"]))
+    if isinstance(raw, str):
+        raw = [raw]
+    return tuple(str(p) for p in raw if str(p).strip())
 
 
 def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                       input_text=None, clusters=None):
-    """Produce the rewritten MML text. Returns (text, warnings)."""
+    """Produce the rewritten MML text. Returns (text, warnings, report)."""
     if input_text is not None and input_text.strip():
         site, serials = parse_ret_input_text(input_text, mapping)
     else:
         site, serials = parse_ret_input(input_path, mapping)
     _rows, _, _, site_index = build_rows(cdd_path, sheet, mapping, clusters=clusters)
-    new_prefix, tilt_by_sector_pos = _site_tilt_index(site_index, site)
+    entry = _site_entry(site_index, site)
+    new_prefix = entry["prefix"]
+    tilt_by_sector_pos = entry["tilts"]
 
     # Map CTRLSRN -> sector_id by inverting the sector_rule over 1..max_sectors.
     max_sectors = mapping.get("sector_rule", {}).get("max_sectors", 9)
@@ -531,45 +723,86 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
     tcfg = mapping.get("text_config", {}).get("template", {})
     prefix_tokens = tcfg.get("prefix_token_count", 2)
     add_prefix = tcfg.get("add_line_prefix", "ADD RET")
-    tilt_prefix = tcfg.get("tilt_line_prefix", "MOD RETTILT")
+    tilt_prefixes = _tilt_line_prefixes(tcfg)
     suf_len = mapping.get("text_config", {}).get("input", {}).get("serial_suffix_len", 3)
+    sigs = _device_signatures(mapping)
 
     with open(template_path, encoding="utf-8") as f:
         tmpl_lines = f.readlines()
 
     warnings = []
+    report = []          # one dict per rewritten ADD RET line, for the preview
+    used_serials = set()
 
-    # Pass 1: DEVICENO -> RCU Tilt, using each ADD RET line's CTRLSRN (sector)
-    # and its order within that sector (positional match).
+    # Sectors the CDD gave this site twice (e.g. Logical Sector IDs 1.1/1.2 and
+    # 2.1/2.2 both landing on S1/S2). The first group's tilts are used; say so.
+    for sid, ys in sorted(entry.get("conflicts", {}).items()):
+        warnings.append(
+            "Sector %s is claimed by %d CellName groups of %s (last chars %s) — "
+            "the first one's tilt is used." % (sid, len(ys), site, "/".join(map(str, ys)))
+        )
+
+    # Pass 1: DEVICENO -> RCU Tilt. The device is identified from its DEVICENAME
+    # ({band_token}_{sector}{slot_suffix}), so the tilt follows the device even
+    # if the ADD RET lines are reordered or a sector is missing devices; the old
+    # order-of-appearance rule is only the fallback.
     deviceno_tilt = {}
     add_pos = defaultdict(int)
     for ln in tmpl_lines:
         if not ln.lstrip().startswith(add_prefix):
             continue
         m_no, m_srn = _RE_DEVICENO.search(ln), _RE_CTRLSRN.search(ln)
-        if not (m_no and m_srn):
+        if not m_no:
             continue
-        srn = m_srn.group(1)
-        pos = add_pos[srn]
+        srn = m_srn.group(1) if m_srn else None
+        pos_seen = add_pos[srn]
         add_pos[srn] += 1
-        sector_id = srn_to_sector.get(srn)
+        srn_sector = srn_to_sector.get(srn) if srn is not None else None
+
+        sector_id = pos = None
+        m_dn = _RE_DEVICENAME.search(ln)
+        if m_dn:
+            suffix = "_".join(m_dn.group(1).split("_")[prefix_tokens:])
+            sector_id, pos = _parse_devicename(suffix, sigs)
+        matched_by = "DEVICENAME"
+        if sector_id is None:
+            sector_id, pos, matched_by = srn_sector, pos_seen, "CTRLSRN+order"
+        elif srn_sector is not None and sector_id != srn_sector:
+            warnings.append(
+                "DEVICENO=%s: DEVICENAME says %s but CTRLSRN=%s means %s — "
+                "using %s." % (m_no.group(1), sector_id, srn, srn_sector, sector_id)
+            )
+
         tilt = tilt_by_sector_pos.get((sector_id, pos))
         if tilt is None:
             warnings.append(
-                "No RCU Tilt for DEVICENO=%s (CTRLSRN=%s, sector=%s, pos=%d)"
-                % (m_no.group(1), srn, sector_id, pos)
+                "No RCU Tilt in the CDD for DEVICENO=%s (sector=%s, device #%s, "
+                "CTRLSRN=%s) — the template's TILT is left unchanged."
+                % (m_no.group(1), sector_id, (pos + 1) if pos is not None else "?", srn)
             )
         deviceno_tilt[m_no.group(1)] = tilt
+        report.append({
+            "deviceno": m_no.group(1), "ctrlsrn": srn, "sector": sector_id,
+            "device_pos": pos, "tilt": tilt, "matched_by": matched_by,
+            "serial": None, "devicename": None,
+        })
+    report_by_no = {r["deviceno"]: r for r in report}
 
     # Pass 2: rewrite lines in place, preserving everything else verbatim.
     out_lines = []
     for ln in tmpl_lines:
         stripped = ln.lstrip()
         if stripped.startswith(add_prefix):
-            def _sub_devicename(m):
+            m_no = _RE_DEVICENO.search(ln)
+            rec = report_by_no.get(m_no.group(1)) if m_no else None
+
+            def _sub_devicename(m, rec=rec):
                 tokens = m.group(1).split("_")
                 suffix = "_".join(tokens[prefix_tokens:])
-                return 'DEVICENAME="%s"' % (new_prefix + "_" + suffix)
+                new = new_prefix + "_" + suffix if suffix else new_prefix
+                if rec is not None:
+                    rec["devicename"] = new
+                return 'DEVICENAME="%s"' % new
 
             ln = _RE_DEVICENAME.sub(_sub_devicename, ln)
 
@@ -577,37 +810,73 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             if m_srn:
                 srn = m_srn.group(1)
 
-                def _sub_serial(m):
+                def _sub_serial(m, srn=srn, rec=rec):
                     suffix = m.group(1)[-suf_len:]
                     new = serials.get((srn, suffix))
                     if new is None:
                         warnings.append(
-                            "No input serial for CTRLSRN=%s suffix=%s" % (srn, suffix)
+                            "No RET-input serial for CTRLSRN=%s ending %r — the "
+                            "template's SERIALNO %s is left in place."
+                            % (srn, suffix, m.group(1))
                         )
                         return m.group(0)
+                    used_serials.add((srn, suffix))
+                    if rec is not None:
+                        rec["serial"] = new
                     return 'SERIALNO="%s"' % new
 
                 ln = _RE_SERIALNO.sub(_sub_serial, ln)
             out_lines.append(ln)
-        elif stripped.startswith(tilt_prefix):
+        elif stripped.startswith(tilt_prefixes):
             m_no = _RE_DEVICENO.search(ln)
             if m_no:
                 tilt = deviceno_tilt.get(m_no.group(1))
                 if tilt is not None:
                     ln = _RE_TILT.sub("TILT=%d" % int(round(float(tilt))), ln)
-                else:
-                    warnings.append("No tilt for MOD RETTILT DEVICENO=%s" % m_no.group(1))
+                elif m_no.group(1) not in deviceno_tilt:
+                    warnings.append(
+                        "%s DEVICENO=%s has no matching %s line in the template."
+                        % (stripped.split(":", 1)[0], m_no.group(1), add_prefix)
+                    )
             out_lines.append(ln)
         else:
             out_lines.append(ln)
 
-    return "".join(out_lines), warnings
+    # Serials pasted in but never placed: usually the wrong site or a template
+    # that covers fewer sectors than the site actually has.
+    unused = sorted(set(serials) - used_serials)
+    if unused:
+        warnings.append(
+            "%d RET-input serial(s) were not used: %s"
+            % (len(unused), ", ".join("CTRLSRN=%s %s" % (s, serials[(s, x)])
+                                      for s, x in unused[:12]))
+            + (" …" if len(unused) > 12 else "")
+        )
+
+    return "".join(out_lines), warnings, report
+
+
+def format_text_report(report, site=None):
+    """Render the per-device mapping table shown next to the MML preview."""
+    lines = []
+    if site:
+        lines.append("Site: %s" % site)
+    lines.append("%-8s %-8s %-7s %-7s %-8s %s"
+                 % ("DEVNO", "CTRLSRN", "SECTOR", "DEV#", "TILT", "DEVICENAME / SERIALNO"))
+    lines.append("-" * 86)
+    for r in report:
+        lines.append("%-8s %-8s %-7s %-7s %-8s %s"
+                     % (r["deviceno"], r["ctrlsrn"] or "-", r["sector"] or "?",
+                        (r["device_pos"] + 1) if r["device_pos"] is not None else "?",
+                        "-" if r["tilt"] is None else r["tilt"],
+                        "%s  %s" % (r["devicename"] or "-", r["serial"] or "(unchanged)")))
+    return "\n".join(lines)
 
 
 def write_text_output(template_path, input_path, cdd_path, sheet, mapping, output_path,
                       input_text=None, clusters=None):
     """build_text_output + write to ``output_path``. Returns warnings."""
-    text, warnings = build_text_output(
+    text, warnings, _report = build_text_output(
         template_path, input_path, cdd_path, sheet, mapping,
         input_text=input_text, clusters=clusters,
     )

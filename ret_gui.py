@@ -7,7 +7,9 @@ Two tabs:
 Run:  uv run ret_gui.py
 """
 import os
+import queue
 import sys
+import threading
 import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -157,9 +159,10 @@ class App(tk.Tk):
         info = ttk.Label(
             parent,
             text=("Rewrites RET_template.txt into an output MML script:\n"
-                  "  • DEVICENAME prefix → {SiteName_New}_{Ne ID} (from CDD)\n"
+                  "  • DEVICENAME prefix → the site from the CDD (line 1 of the input)\n"
                   "  • SERIALNO → input serial matched by CTRLSRN + last 3 chars\n"
-                  "  • MOD RETTILT TILT → RCU Tilt of the same device (from CDD)"),
+                  "  • MOD RETTILT / MOD RETSUBUNIT TILT → that device's RCU Tilt (CDD)\n"
+                  "Check the Device map tab to see where every tilt and serial came from."),
             justify="left",
         )
         info.pack(fill="x", **pad)
@@ -205,17 +208,99 @@ class App(tk.Tk):
         prev.pack(fill="both", expand=True, **pad)
         bar = ttk.Frame(prev)
         bar.pack(fill="x")
-        ttk.Button(bar, text="Preview", command=self.text_preview).pack(side="left", padx=4, pady=4)
+        self.txt_preview_btn = ttk.Button(bar, text="Preview", command=self.text_preview)
+        self.txt_preview_btn.pack(side="left", padx=4, pady=4)
         ttk.Button(bar, text="Copy", command=self.text_copy).pack(side="left", padx=4, pady=4)
         ttk.Label(bar, textvariable=self.txt_status_var).pack(side="left", padx=10)
 
-        self.txt_preview = tk.Text(prev, height=14, wrap="none")
-        ysb = ttk.Scrollbar(prev, orient="vertical", command=self.txt_preview.yview)
-        xsb = ttk.Scrollbar(prev, orient="horizontal", command=self.txt_preview.xview)
-        self.txt_preview.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        # Two views of the same run: the MML that will be written, and the
+        # device-by-device table showing where each tilt and serial came from —
+        # the latter is what makes a wrong result obvious before it is applied.
+        views = ttk.Notebook(prev)
+        views.pack(fill="both", expand=True, padx=4, pady=4)
+        self.txt_preview = self._text_view(views, "MML output")
+        self.txt_report = self._text_view(views, "Device map")
+        self.txt_warnings = self._text_view(views, "Warnings")
+        self._views = views
+
+    @staticmethod
+    def _text_view(notebook, title):
+        """A monospaced, scrollable read-out added as a tab of ``notebook``."""
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text=title)
+        txt = tk.Text(frame, height=14, wrap="none", font=("TkFixedFont", 9))
+        ysb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        xsb = ttk.Scrollbar(frame, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
         xsb.pack(side="bottom", fill="x")
-        self.txt_preview.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
-        ysb.pack(side="left", fill="y", pady=4)
+        ysb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        return txt
+
+    @staticmethod
+    def _set_text(widget, content):
+        widget.delete("1.0", "end")
+        widget.insert("1.0", content)
+
+    # ---------- background work ----------
+    def _run_async(self, label, work, done, buttons=()):
+        """Run ``work()`` off the UI thread, then ``done(result)`` back on it.
+
+        Parsing a 20 MB CDD takes a moment even with the fast reader, and doing
+        it inline froze the whole window (Windows would grey it out as "not
+        responding"). The clicked buttons are disabled meanwhile so a second
+        click cannot start a competing parse.
+        """
+        for b in buttons:
+            b.state(["disabled"])
+        self.txt_status_var.set(label)
+        self.status_var.set(label)
+        out = queue.Queue(1)
+
+        def runner():
+            try:
+                out.put(("ok", work()))
+            except Exception as e:  # reported on the UI thread
+                out.put(("err", (e, traceback.format_exc())))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+        def poll():
+            try:
+                kind, payload = out.get_nowait()
+            except queue.Empty:
+                self.after(60, poll)
+                return
+            for b in buttons:
+                b.state(["!disabled"])
+            if kind == "err":
+                e, tb = payload
+                self.txt_status_var.set("Failed.")
+                self.status_var.set("Failed.")
+                messagebox.showerror("Error", str(e) if isinstance(e, ValueError)
+                                     else f"{e}\n\n{tb}")
+                return
+            done(payload)
+
+        self.after(60, poll)
+
+    def _warm_cdd_cache(self):
+        """Parse the selected CDD in the background so the first click is instant."""
+        cdd, sheet = self.cdd_var.get(), self.sheet_var.get()
+        if not (cdd and sheet and os.path.exists(cdd)):
+            return
+        try:
+            mapping = self._load_mapping()
+        except Exception:
+            return
+
+        def warm():
+            try:
+                ret_core.read_cdd(cdd, sheet, mapping)
+            except Exception:
+                pass
+
+        threading.Thread(target=warm, daemon=True).start()
 
     # ---------- cluster / sheet loading ----------
     def _selected_clusters(self):
@@ -254,6 +339,7 @@ class App(tk.Tk):
             pass
         self.sheet_var.set(preferred if preferred in sheets else (sheets[0] if sheets else ""))
         self._load_clusters()
+        self._warm_cdd_cache()
 
     # ---------- mapping ----------
     def _load_mapping(self):
@@ -338,7 +424,8 @@ class App(tk.Tk):
             self._open_folder(os.path.dirname(self.output_var.get()))
 
     # ---------- text actions ----------
-    def _gather_text(self):
+    def _text_job(self):
+        """Validate the text-tab inputs and return the work callable + site name."""
         input_text = self.txt_input_box.get("1.0", "end-1c")
         if not input_text.strip():
             raise ValueError("Paste the RET input text (or use 'Load file…').")
@@ -349,26 +436,41 @@ class App(tk.Tk):
         if not self.sheet_var.get():
             raise ValueError("Select a sheet on the first tab.")
         mapping = self._load_mapping()
-        text, warnings = ret_core.build_text_output(
-            self.txt_template_var.get(), self.txt_input_var.get(),
-            self.cdd_var.get(), self.sheet_var.get(), mapping,
-            input_text=input_text, clusters=self._selected_clusters(),
+        site = next((ln.strip() for ln in input_text.splitlines() if ln.strip()), "")
+        args = (self.txt_template_var.get(), self.txt_input_var.get(),
+                self.cdd_var.get(), self.sheet_var.get(), mapping)
+        kwargs = {"input_text": input_text, "clusters": self._selected_clusters()}
+        return site, lambda: ret_core.build_text_output(*args, **kwargs)
+
+    def _show_text_result(self, site, text, warnings, report):
+        self._set_text(self.txt_preview, text)
+        self._set_text(self.txt_report, ret_core.format_text_report(report, site))
+        self._set_text(
+            self.txt_warnings,
+            "\n".join("• " + w for w in warnings) if warnings
+            else "No warnings — every device matched a CDD tilt and an input serial.",
         )
-        return mapping, text, warnings
+        # Land on the Warnings tab when something needs a human, otherwise show
+        # the MML the user came for.
+        self._views.select(2 if warnings else 0)
 
     def text_preview(self):
         try:
-            _, text, warnings = self._gather_text()
+            site, work = self._text_job()
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
-        self.txt_preview.delete("1.0", "end")
-        self.txt_preview.insert("1.0", text)
-        self.txt_status_var.set(
-            "Preview ready." + (f"  ·  {len(warnings)} warning(s)" if warnings else "")
-        )
-        if warnings:
-            self._show_warnings(warnings)
+
+        def done(result):
+            text, warnings, report = result
+            self._show_text_result(site, text, warnings, report)
+            self.txt_status_var.set(
+                f"Preview ready for {site}  ·  {len(report)} device(s)"
+                + (f"  ·  {len(warnings)} warning(s)" if warnings else "  ·  no warnings")
+            )
+
+        self._run_async(f"Reading CDD for {site}…", work, done,
+                        buttons=(self.txt_preview_btn,))
 
     def text_copy(self):
         text = self.txt_preview.get("1.0", "end-1c")
@@ -382,25 +484,33 @@ class App(tk.Tk):
 
     def text_generate(self):
         try:
-            _, text, warnings = self._gather_text()
-            with open(self.txt_output_var.get(), "w", encoding="utf-8") as f:
-                f.write(text)
+            site, work = self._text_job()
         except Exception as e:
-            messagebox.showerror("Generation failed", f"{e}\n\n{traceback.format_exc()}")
+            messagebox.showerror("Error", str(e))
             return
-        self.txt_preview.delete("1.0", "end")
-        self.txt_preview.insert("1.0", text)
-        self.txt_status_var.set(f"Wrote → {os.path.basename(self.txt_output_var.get())}")
-        if warnings:
-            self._show_warnings(warnings)
-        if messagebox.askyesno("Done", f"Wrote:\n{self.txt_output_var.get()}\n\nOpen containing folder?"):
-            self._open_folder(os.path.dirname(self.txt_output_var.get()))
+        out_path = self.txt_output_var.get()
 
-    @staticmethod
-    def _show_warnings(warnings):
-        preview = "\n".join(warnings[:20])
-        more = "" if len(warnings) <= 20 else f"\n… +{len(warnings) - 20} more"
-        messagebox.showwarning("Warnings", preview + more)
+        def done(result):
+            text, warnings, report = result
+            try:
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception as e:
+                messagebox.showerror("Generation failed", f"{e}\n\n{traceback.format_exc()}")
+                return
+            self._show_text_result(site, text, warnings, report)
+            self.txt_status_var.set(
+                f"Wrote {len(report)} device(s) for {site} → {os.path.basename(out_path)}"
+                + (f"  ·  {len(warnings)} warning(s)" if warnings else "")
+            )
+            note = (f"\n\n{len(warnings)} warning(s) — see the Warnings tab."
+                    if warnings else "")
+            if messagebox.askyesno("Done", f"Wrote:\n{out_path}{note}"
+                                           "\n\nOpen containing folder?"):
+                self._open_folder(os.path.dirname(out_path))
+
+        self._run_async(f"Reading CDD for {site}…", work, done,
+                        buttons=(self.txt_preview_btn,))
 
     # ---------- browsers ----------
     def _browse_cdd(self):
@@ -420,11 +530,16 @@ class App(tk.Tk):
         if not path or not os.path.exists(path):
             messagebox.showerror("Reload CDD", "Select a valid CDD file first.")
             return
+        # Drop the memoised parse first: the whole point of Reload is to pick up
+        # a CDD that changed on disk, and the cache would otherwise serve the
+        # old copy whenever mtime/size happened to be unchanged.
+        ret_core.clear_cdd_cache()
         current_sheet = self.sheet_var.get()
         self._load_sheets()
         if current_sheet in (self.text_sheet_combo["values"] or ()):
             self.sheet_var.set(current_sheet)
         self.txt_status_var.set(f"Reloaded CDD: {os.path.basename(path)}")
+        self._warm_cdd_cache()
 
     def _browse_into(self, var, label, pattern):
         path = filedialog.askopenfilename(filetypes=[(label, pattern), ("All files", "*.*")])
