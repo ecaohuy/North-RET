@@ -829,6 +829,12 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                 tilt_raw[m.group(1)].append(ln)
 
     # Pass 2: rewrite lines in place, preserving everything else verbatim.
+    # skip_unmatched_devices: a device whose SERIALNO has no match in the RET
+    # input is left OUT of the output (ADD RET + its tilt lines) with a warning,
+    # instead of shipping a line that still carries the template site's serial.
+    # The rest of the script is still produced.
+    skip_unmatched = tcfg.get("skip_unmatched_devices", True)
+    skipped_nos = set()
     out_lines = []
     last_add_idx = last_tilt_idx = None   # where replicated blocks are inserted
     for ln in tmpl_lines:
@@ -850,30 +856,40 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             ln = _RE_DEVICENAME.sub(_sub_devicename, ln)
 
             m_srn = _RE_CTRLSRN.search(ln)
-            if m_srn:
+            m_ser = _RE_SERIALNO.search(ln)
+            if m_srn and m_ser:
                 srn = m_srn.group(1)
-
-                def _sub_serial(m, srn=srn, rec=rec):
-                    suffix = m.group(1)[-suf_len:]
-                    new = serials.get((srn, suffix))
-                    if new is None:
-                        warnings.append(
-                            "No RET-input serial for CTRLSRN=%s ending %r — the "
-                            "template's SERIALNO %s is left in place."
-                            % (srn, suffix, m.group(1))
-                        )
-                        return m.group(0)
-                    used_serials.add((srn, suffix))
+                sfx = m_ser.group(1)[-suf_len:]
+                new_ser = serials.get((srn, sfx))
+                if new_ser is not None:
+                    used_serials.add((srn, sfx))
                     if rec is not None:
-                        rec["serial"] = new
-                    return 'SERIALNO="%s"' % new
-
-                ln = _RE_SERIALNO.sub(_sub_serial, ln)
+                        rec["serial"] = new_ser
+                    ln = _RE_SERIALNO.sub(
+                        lambda m: 'SERIALNO="%s"' % new_ser, ln, count=1)
+                elif skip_unmatched:
+                    warnings.append(
+                        "No RET-input serial for CTRLSRN=%s ending %r — DEVICENO=%s "
+                        "(%s) was left out of the output."
+                        % (srn, sfx, m_no.group(1) if m_no else "?",
+                           (rec or {}).get("devicename") or m_ser.group(1))
+                    )
+                    if rec is not None:
+                        rec["skipped"] = "no input serial"
+                    if m_no:
+                        skipped_nos.add(m_no.group(1))
+                    continue
+                else:
+                    warnings.append(
+                        "No RET-input serial for CTRLSRN=%s ending %r — the "
+                        "template's SERIALNO %s is left in place."
+                        % (srn, sfx, m_ser.group(1))
+                    )
             out_lines.append(ln)
             last_add_idx = len(out_lines) - 1
         elif stripped.startswith(tilt_prefixes):
             m_no = _RE_DEVICENO.search(ln)
-            if m_no and m_no.group(1) in dropped_nos:
+            if m_no and m_no.group(1) in (dropped_nos | skipped_nos):
                 continue
             if m_no:
                 tilt = deviceno_tilt.get(m_no.group(1))
@@ -915,7 +931,8 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             # reusing them keeps DEVICENO sequential (S3 dropped as 8-11 ->
             # the replicated S4 starts at 8, not 12).
             next_no = max((int(r["deviceno"]) for r in report
-                           if r["deviceno"] not in dropped_nos), default=-1) + 1
+                           if r["deviceno"] not in dropped_nos
+                           and not r.get("skipped")), default=-1) + 1
             new_adds, new_tilts = [], []
             for sid in missing_sectors:
                 srn = sector_to_srn.get(sid)
@@ -925,11 +942,38 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                         % (sid, site))
                     continue
                 for r in proto_recs[proto_sid]:
-                    pos, no = r["device_pos"], next_no
-                    next_no += 1
+                    pos = r["device_pos"]
                     dev = devices[pos] if pos is not None and pos < len(devices) else {}
                     new_name = "%s_%s_%s%s" % (
                         new_prefix, dev.get("band_token", ""), sid, dev.get("slot_suffix", ""))
+                    # Serial first: a replicated device the input has no serial
+                    # for is left out entirely (when skip_unmatched_devices),
+                    # the same rule native lines follow — never emit a line
+                    # carrying the template site's serial.
+                    new_serial = sfx = None
+                    m_ser = _RE_SERIALNO.search(r["_raw"])
+                    if m_ser:
+                        sfx = m_ser.group(1)[-suf_len:]
+                        new_serial = serials.get((srn, sfx))
+                    if m_ser and new_serial is None:
+                        if skip_unmatched:
+                            warnings.append(
+                                "No RET-input serial for CTRLSRN=%s ending %r — %s "
+                                "was left out of the output." % (srn, sfx, new_name))
+                            report.append({
+                                "deviceno": "-", "ctrlsrn": srn, "sector": sid,
+                                "device_pos": pos, "tilt": None,
+                                "matched_by": "replicated from %s" % proto_sid,
+                                "serial": None, "devicename": new_name,
+                                "skipped": "no input serial",
+                            })
+                            continue
+                        warnings.append(
+                            "No RET-input serial for CTRLSRN=%s ending %r — the "
+                            "template's SERIALNO %s is left in place."
+                            % (srn, sfx, m_ser.group(1)))
+                    no = next_no
+                    next_no += 1
                     ln = r["_raw"]
                     ln = re.sub(r"(DEVICENO=\s*)\d+",
                                 lambda m: m.group(1) + str(no), ln, count=1)
@@ -937,20 +981,10 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                                 lambda m: m.group(1) + srn, ln, count=1)
                     ln = _RE_DEVICENAME.sub(lambda m: 'DEVICENAME="%s"' % new_name,
                                             ln, count=1)
-                    new_serial = None
-                    m_ser = _RE_SERIALNO.search(ln)
-                    if m_ser:
-                        sfx = m_ser.group(1)[-suf_len:]
-                        new_serial = serials.get((srn, sfx))
-                        if new_serial is None:
-                            warnings.append(
-                                "No RET-input serial for CTRLSRN=%s ending %r — the "
-                                "template's SERIALNO %s is left in place."
-                                % (srn, sfx, m_ser.group(1)))
-                        else:
-                            used_serials.add((srn, sfx))
-                            ln = _RE_SERIALNO.sub(
-                                lambda m: 'SERIALNO="%s"' % new_serial, ln, count=1)
+                    if new_serial is not None:
+                        used_serials.add((srn, sfx))
+                        ln = _RE_SERIALNO.sub(
+                            lambda m: 'SERIALNO="%s"' % new_serial, ln, count=1)
                     new_adds.append(ln if ln.endswith("\n") else ln + "\n")
                     tilt = tilt_by_sector_pos.get((sid, pos))
                     if tilt is None and tilt_raw.get(r["deviceno"]):
@@ -1013,11 +1047,13 @@ def format_text_report(report, site=None):
                  % ("DEVNO", "CTRLSRN", "SECTOR", "DEV#", "TILT", "DEVICENAME / SERIALNO"))
     lines.append("-" * 86)
     for r in report:
+        serial = r["serial"] or (
+            "(skipped: %s)" % r["skipped"] if r.get("skipped") else "(unchanged)")
         lines.append("%-8s %-8s %-7s %-7s %-8s %s"
                      % (r["deviceno"], r["ctrlsrn"] or "-", r["sector"] or "?",
                         (r["device_pos"] + 1) if r["device_pos"] is not None else "?",
                         "-" if r["tilt"] is None else r["tilt"],
-                        "%s  %s" % (r["devicename"] or "-", r["serial"] or "(unchanged)")))
+                        "%s  %s" % (r["devicename"] or "-", serial)))
     return "\n".join(lines)
 
 

@@ -71,6 +71,14 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   DEVICENAME sector token is swapped, and SERIALNO/TILT are matched exactly
   like native lines. A template sector the site does not have is dropped with
   a warning instead of surviving with the template site's serials and tilts.
+- **Errors never block the MML output**
+  (`text_config.template.skip_unmatched_devices`, default true): a device —
+  native or replicated — whose SERIALNO finds no match in the RET input is
+  left out (its ADD RET and tilt lines dropped, warning raised, shown as
+  `(skipped: no input serial)` in the Device map) rather than shipped with
+  the template site's serial; a sector with no serials at all simply
+  disappears. A missing tilt stays non-fatal: the line is kept with the
+  template's TILT and a warning.
 - `build_text_output` returns `(text, warnings, report)`; `report` is one record
   per ADD RET device (sector, device #, tilt, serial, how it matched) and is
   what the GUI's "Device map" tab shows. Warnings also call out unused input

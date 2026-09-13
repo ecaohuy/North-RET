@@ -128,6 +128,8 @@
       "_tilt_note": "May be a single string or a list. A Huawei RET template can carry the tilt on MOD RETTILT, on MOD RETSUBUNIT, or on both; every listed verb has its TILT= rewritten, so no tilt line is left holding the template site's values.",
       "extend_sectors": true,
       "drop_surplus_sectors": true,
+      "skip_unmatched_devices": true,
+      "_skip_note": "A device (native or replicated) whose SERIALNO finds no match in the RET input is left OUT of the output — its ADD RET and tilt lines are dropped with a warning — instead of shipping a line that still carries the template site's serial. The rest of the script is always produced; an entire sector with no serials simply disappears. false = old behavior (line kept with the template's SERIALNO).",
       "_sector_note": "The output covers exactly the sectors the CDD gives the site. extend_sectors: when the site has MORE sectors than the template (e.g. the 6-sector HHK098/HNIHKM33_LN vs the standard 3-sector template), the template's fullest sector block is replicated per missing sector — DEVICENO continues sequentially, CTRLSRN from the sector rule (S4=63, S5=64, S6=65), the DEVICENAME sector token is swapped, and SERIALNO/TILT are matched exactly like native lines. drop_surplus_sectors: a template sector the site does not have is dropped (with a warning) instead of surviving with the template site's serials and tilts."
     },
     "rules": {
