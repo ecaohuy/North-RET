@@ -62,6 +62,15 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   fallback. `text_config.template.tilt_line_prefix` may be a list — it defaults
   to `["MOD RETTILT", "MOD RETSUBUNIT"]`, because a template carrying its tilt
   on the verb that isn't rewritten silently keeps the *template site's* tilts.
+- The MML output covers **exactly the sectors the CDD gives the site**
+  (`text_config.template.extend_sectors` / `drop_surplus_sectors`, both default
+  true). When the site has more sectors than the template (e.g. the 6-sector
+  HHK098 → `HNIHKM33_LN` vs the standard 3-sector template), the template's
+  fullest sector block is replicated per missing sector: DEVICENO continues
+  sequentially (12…23), CTRLSRN from the sector rule (S4=63…S6=65), the
+  DEVICENAME sector token is swapped, and SERIALNO/TILT are matched exactly
+  like native lines. A template sector the site does not have is dropped with
+  a warning instead of surviving with the template site's serials and tilts.
 - `build_text_output` returns `(text, warnings, report)`; `report` is one record
   per ADD RET device (sector, device #, tilt, serial, how it matched) and is
   what the GUI's "Device map" tab shows. Warnings also call out unused input

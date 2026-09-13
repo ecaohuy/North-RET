@@ -685,6 +685,12 @@ def _parse_devicename(suffix, sigs):
     return None, None
 
 
+def _sector_num(sid):
+    """'S4' -> 4, for ordering sector ids numerically."""
+    m = re.search(r"(\d+)$", str(sid))
+    return int(m.group(1)) if m else 0
+
+
 def _tilt_line_prefixes(tcfg):
     """The MML verbs whose TILT= is rewritten.
 
@@ -774,8 +780,9 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             )
 
         tilt = tilt_by_sector_pos.get((sector_id, pos))
+        tilt_warn = None
         if tilt is None:
-            warnings.append(
+            tilt_warn = (
                 "No RCU Tilt in the CDD for DEVICENO=%s (sector=%s, device #%s, "
                 "CTRLSRN=%s) — the template's TILT is left unchanged."
                 % (m_no.group(1), sector_id, (pos + 1) if pos is not None else "?", srn)
@@ -785,15 +792,51 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             "deviceno": m_no.group(1), "ctrlsrn": srn, "sector": sector_id,
             "device_pos": pos, "tilt": tilt, "matched_by": matched_by,
             "serial": None, "devicename": None,
+            "_raw": ln, "_tilt_warn": tilt_warn,
         })
     report_by_no = {r["deviceno"]: r for r in report}
 
+    # The template's sector blocks vs the sectors the CDD gives this site.
+    # A 3-sector template applied to a 6-sector site (e.g. HHK098/HNIHKM33_LN)
+    # must not silently emit only S1-S3, and a template sector the site does
+    # not have must not survive with the template site's serials and tilts.
+    site_sectors = set(entry.get("sectors", {}))
+    template_sectors = {r["sector"] for r in report if r["sector"] is not None}
+    missing_sectors, surplus_sectors = [], set()
+    if site_sectors and template_sectors:
+        if tcfg.get("extend_sectors", True):
+            missing_sectors = sorted(site_sectors - template_sectors, key=_sector_num)
+        if tcfg.get("drop_surplus_sectors", True):
+            surplus_sectors = template_sectors - site_sectors
+    dropped_nos = {r["deviceno"] for r in report if r["sector"] in surplus_sectors}
+    for sid in sorted(surplus_sectors, key=_sector_num):
+        nos = [r["deviceno"] for r in report if r["sector"] == sid]
+        warnings.append(
+            "%s has no sector %s in the CDD — the template's %s block "
+            "(DEVICENO %s) was dropped." % (site, sid, sid, ", ".join(nos))
+        )
+    for r in report:
+        if r["_tilt_warn"] and r["deviceno"] not in dropped_nos:
+            warnings.append(r["_tilt_warn"])
+
+    # The template tilt lines per DEVICENO, kept raw so a replicated sector can
+    # clone them verbatim (same verbs, same formatting).
+    tilt_raw = defaultdict(list)
+    for ln in tmpl_lines:
+        if ln.lstrip().startswith(tilt_prefixes):
+            m = _RE_DEVICENO.search(ln)
+            if m:
+                tilt_raw[m.group(1)].append(ln)
+
     # Pass 2: rewrite lines in place, preserving everything else verbatim.
     out_lines = []
+    last_add_idx = last_tilt_idx = None   # where replicated blocks are inserted
     for ln in tmpl_lines:
         stripped = ln.lstrip()
         if stripped.startswith(add_prefix):
             m_no = _RE_DEVICENO.search(ln)
+            if m_no and m_no.group(1) in dropped_nos:
+                continue
             rec = report_by_no.get(m_no.group(1)) if m_no else None
 
             def _sub_devicename(m, rec=rec):
@@ -827,8 +870,11 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
 
                 ln = _RE_SERIALNO.sub(_sub_serial, ln)
             out_lines.append(ln)
+            last_add_idx = len(out_lines) - 1
         elif stripped.startswith(tilt_prefixes):
             m_no = _RE_DEVICENO.search(ln)
+            if m_no and m_no.group(1) in dropped_nos:
+                continue
             if m_no:
                 tilt = deviceno_tilt.get(m_no.group(1))
                 if tilt is not None:
@@ -839,8 +885,110 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                         % (stripped.split(":", 1)[0], m_no.group(1), add_prefix)
                     )
             out_lines.append(ln)
+            last_tilt_idx = len(out_lines) - 1
         else:
             out_lines.append(ln)
+
+    # Extension: the CDD says the site has sectors the template does not carry
+    # (e.g. a 6-sector CRAN site rewritten from the standard 3-sector template).
+    # Replicate the template's own sector block — its formatting is the style
+    # source — once per missing sector: DEVICENO continues sequentially, CTRLSRN
+    # comes from the sector rule, DEVICENAME gets the sector token swapped, and
+    # SERIALNO/TILT go through the same matching as native lines.
+    if missing_sectors:
+        sector_to_srn = {sid: srn for srn, sid in srn_to_sector.items()}
+        proto_recs = {}      # sector_id -> [recs matched by DEVICENAME, template order]
+        for r in report:
+            if r["matched_by"] == "DEVICENAME" and r["deviceno"] not in dropped_nos:
+                proto_recs.setdefault(r["sector"], []).append(r)
+        proto_sid = max(proto_recs, key=lambda s: len(proto_recs[s]), default=None)
+        if proto_sid is None:
+            warnings.append(
+                "%s has sector(s) %s in the CDD but the template has no sector "
+                "block whose DEVICENAMEs could be parsed — nothing was replicated."
+                % (site, ", ".join(missing_sectors))
+            )
+        else:
+            devices = mapping.get("devices", [])
+            # Continue numbering after the highest SURVIVING device; numbers
+            # freed by a dropped sector block never reach the output, so
+            # reusing them keeps DEVICENO sequential (S3 dropped as 8-11 ->
+            # the replicated S4 starts at 8, not 12).
+            next_no = max((int(r["deviceno"]) for r in report
+                           if r["deviceno"] not in dropped_nos), default=-1) + 1
+            new_adds, new_tilts = [], []
+            for sid in missing_sectors:
+                srn = sector_to_srn.get(sid)
+                if srn is None:
+                    warnings.append(
+                        "Sector %s of %s is outside the sector rule — not replicated."
+                        % (sid, site))
+                    continue
+                for r in proto_recs[proto_sid]:
+                    pos, no = r["device_pos"], next_no
+                    next_no += 1
+                    dev = devices[pos] if pos is not None and pos < len(devices) else {}
+                    new_name = "%s_%s_%s%s" % (
+                        new_prefix, dev.get("band_token", ""), sid, dev.get("slot_suffix", ""))
+                    ln = r["_raw"]
+                    ln = re.sub(r"(DEVICENO=\s*)\d+",
+                                lambda m: m.group(1) + str(no), ln, count=1)
+                    ln = re.sub(r"(CTRLSRN=\s*)\d+",
+                                lambda m: m.group(1) + srn, ln, count=1)
+                    ln = _RE_DEVICENAME.sub(lambda m: 'DEVICENAME="%s"' % new_name,
+                                            ln, count=1)
+                    new_serial = None
+                    m_ser = _RE_SERIALNO.search(ln)
+                    if m_ser:
+                        sfx = m_ser.group(1)[-suf_len:]
+                        new_serial = serials.get((srn, sfx))
+                        if new_serial is None:
+                            warnings.append(
+                                "No RET-input serial for CTRLSRN=%s ending %r — the "
+                                "template's SERIALNO %s is left in place."
+                                % (srn, sfx, m_ser.group(1)))
+                        else:
+                            used_serials.add((srn, sfx))
+                            ln = _RE_SERIALNO.sub(
+                                lambda m: 'SERIALNO="%s"' % new_serial, ln, count=1)
+                    new_adds.append(ln if ln.endswith("\n") else ln + "\n")
+                    tilt = tilt_by_sector_pos.get((sid, pos))
+                    if tilt is None and tilt_raw.get(r["deviceno"]):
+                        warnings.append(
+                            "No RCU Tilt in the CDD for DEVICENO=%s (sector=%s, "
+                            "device #%s, CTRLSRN=%s) — the template's TILT is left "
+                            "unchanged." % (no, sid, (pos + 1) if pos is not None else "?", srn))
+                    for tln in tilt_raw.get(r["deviceno"], []):
+                        tln = re.sub(r"(DEVICENO=\s*)\d+",
+                                     lambda m: m.group(1) + str(no), tln, count=1)
+                        if tilt is not None:
+                            tln = _RE_TILT.sub("TILT=%d" % int(round(float(tilt))), tln)
+                        new_tilts.append(tln if tln.endswith("\n") else tln + "\n")
+                    report.append({
+                        "deviceno": str(no), "ctrlsrn": srn, "sector": sid,
+                        "device_pos": pos, "tilt": tilt,
+                        "matched_by": "replicated from %s" % proto_sid,
+                        "serial": new_serial, "devicename": new_name,
+                    })
+            if new_adds:
+                warnings.append(
+                    "Template covers %s but %s has %d sector(s) in the CDD — the %s "
+                    "block was replicated for %s."
+                    % ("/".join(sorted(template_sectors - surplus_sectors, key=_sector_num)),
+                       site, len(site_sectors), proto_sid, ", ".join(missing_sectors)))
+                add_at = len(out_lines) if last_add_idx is None else last_add_idx + 1
+                tilt_at = len(out_lines) if last_tilt_idx is None else last_tilt_idx + 1
+                if tilt_at >= add_at:
+                    out_lines[tilt_at:tilt_at] = new_tilts
+                    out_lines[add_at:add_at] = new_adds
+                else:
+                    out_lines[add_at:add_at] = new_adds
+                    out_lines[tilt_at:tilt_at] = new_tilts
+
+    report = [r for r in report if r["deviceno"] not in dropped_nos]
+    for r in report:
+        r.pop("_raw", None)
+        r.pop("_tilt_warn", None)
 
     # Serials pasted in but never placed: usually the wrong site or a template
     # that covers fewer sectors than the site actually has.

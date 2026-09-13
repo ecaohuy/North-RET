@@ -125,7 +125,10 @@
       "prefix_token_count": 1,
       "add_line_prefix": "ADD RET",
       "tilt_line_prefix": ["MOD RETTILT", "MOD RETSUBUNIT"],
-      "_tilt_note": "May be a single string or a list. A Huawei RET template can carry the tilt on MOD RETTILT, on MOD RETSUBUNIT, or on both; every listed verb has its TILT= rewritten, so no tilt line is left holding the template site's values."
+      "_tilt_note": "May be a single string or a list. A Huawei RET template can carry the tilt on MOD RETTILT, on MOD RETSUBUNIT, or on both; every listed verb has its TILT= rewritten, so no tilt line is left holding the template site's values.",
+      "extend_sectors": true,
+      "drop_surplus_sectors": true,
+      "_sector_note": "The output covers exactly the sectors the CDD gives the site. extend_sectors: when the site has MORE sectors than the template (e.g. the 6-sector HHK098/HNIHKM33_LN vs the standard 3-sector template), the template's fullest sector block is replicated per missing sector — DEVICENO continues sequentially, CTRLSRN from the sector rule (S4=63, S5=64, S6=65), the DEVICENAME sector token is swapped, and SERIALNO/TILT are matched exactly like native lines. drop_surplus_sectors: a template sector the site does not have is dropped (with a warning) instead of surviving with the template site's serials and tilts."
     },
     "rules": {
       "devicename": "Replace the leading {prefix_token_count} token(s) of DEVICENAME with the site_match prefix (NEName_New by default, no Ne ID); keep the band/sector/slot suffix from the template.",
