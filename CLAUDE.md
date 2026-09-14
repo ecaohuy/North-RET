@@ -53,7 +53,16 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   that supplies the rewritten site token (`ne_name` = NEName_New by default,
   e.g. `HNIPTH01_LN`; `site_new` = SiteName_New, e.g. `HNIPTH01`).
   `site_match.include_ne_id` (default false) appends `_{Ne ID}` to that token
-  when a template needs it. The site name is matched case-insensitively and,
+  when a template needs it. **Per-sector site code**
+  (`site_match.prefix_site_code`, default on, length 8): the first 8 chars of
+  each sector's DEVICENAME site token are `LEFT(CellName (New)[Key], 8)` of
+  that sector's cell — so a co-located sector's DEVICENAME carries its own
+  cell's site code (e.g. S4 of `HNIHPU04_LN` → `HNIHPU05_…`), on native and
+  replicated lines alike. **`site_match.prefix_strip_suffixes`** (default
+  `["_LN", "_4G"]`) then drops those endings from the token, so
+  `HNIHPU04_LN` writes DEVICENAMEs as `HNIHPU04_…`; RET-input site matching
+  still uses the full NEName_New. The site name is matched
+  case-insensitively and,
   failing that, on the bare site code (`HNIVTH16` finds `HNIVTH16_LN`); an
   ambiguous short form is reported, never guessed.
 - MML tilts are matched **by device identity, not line order**: the template

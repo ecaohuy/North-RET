@@ -325,8 +325,10 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
       rows         = list of 8-value lists (matching HEADERS)
       skipped      = list of (cell_name, reason)
       sector_count = number of distinct (site, sector) groups emitted
-      site_index   = {site_new: {"prefix": ..., "tilts": {(sector_id, pos): tilt}}}
-                     for the MML text feature.
+      site_index   = {site_new: {"prefix": ..., "tilts": {(sector_id, pos): tilt},
+                     "sector_prefixes": {sector_id: prefix}}} for the MML text
+                     feature; sector_prefixes carries the per-sector DEVICENAME
+                     prefix (site_match.prefix_site_code).
     """
     _require_mapping_keys(mapping)
     devices = mapping["devices"]
@@ -354,6 +356,22 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     # Append the Ne ID to the prefix? Templates whose DEVICENAME is just
     # {site}_{band}_{sector}_{slot} (no Ne ID) set this false.
     include_ne_id = site_match.get("include_ne_id", False)
+    # Per-sector site code: the first `length` chars of the DEVICENAME site
+    # token come from LEFT(CellName, length) of that sector's cell, so a
+    # co-located sector carries its own cell's site code, not the NE's.
+    psc = site_match.get("prefix_site_code") or {}
+    psc_from_cell = psc.get("source") == "cell_name"
+    psc_len = int(psc.get("length", 8))
+    # Endings stripped from the DEVICENAME site token (e.g. '_LN', '_4G'), so
+    # the output matches templates whose DEVICENAME carries no NE suffix.
+    # RET-input site matching is untouched (site_index keys keep the full name).
+    strip_sfx = [str(s) for s in site_match.get("prefix_strip_suffixes", []) if str(s)]
+
+    def _strip_token(tok):
+        for s in strip_sfx:
+            if tok.upper().endswith(s.upper()):
+                return tok[:-len(s)]
+        return tok
 
     data = read_cdd(cdd_path, sheet, mapping)
     missing = data.missing(("site_new", "cell_name"))
@@ -373,6 +391,7 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     sector_ne_name = {}             # (site_new, Y) -> NEName_New (first non-blank)
     sector_offset = {}              # (site_new, Y) -> 0 (own site) or colocated_offset
     sector_lsid = {}                # (site_new, Y) -> Logical Sector ID (first non-blank)
+    sector_cell_code = {}           # (site_new, Y) -> LEFT(CellName, psc_len)
     sector_order = []
     seen = set()
     skipped = []
@@ -424,6 +443,8 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
             sector_offset[key] = offset
         if lsid_val not in (None, "") and key not in sector_lsid:
             sector_lsid[key] = lsid_val
+        if key not in sector_cell_code:
+            sector_cell_code[key] = cell[:psc_len]
         ne_id = _get(r, "ne_id")
         if ne_id not in (None, "") and key not in sector_ne_id:
             sector_ne_id[key] = ne_id
@@ -454,10 +475,21 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
         # RET MML: the RET input line 1 is matched against site_match_field
         # (NEName_New by default), which also supplies the DEVICENAME site token.
         prefix_site = site_name if site_match_field == "ne_name" else site_new
-        prefix = f"{prefix_site}_{ne_id}".rstrip("_") if include_ne_id else str(prefix_site)
+        base_token = _strip_token(str(prefix_site))
+        prefix = f"{base_token}_{ne_id}".rstrip("_") if include_ne_id else base_token
         site_entry = site_index.setdefault(
             prefix_site, {"prefix": prefix, "tilts": {}, "conflicts": {}}
         )
+        # Per-sector DEVICENAME prefix (site_match.prefix_site_code): the first
+        # psc_len chars of the site token are LEFT(CellName, psc_len) of this
+        # sector's cell; the rest of the token (e.g. '_LN') is kept. First
+        # CellName group to claim the sector wins, same as tilts below.
+        sector_prefix = prefix
+        code = sector_cell_code.get(key, "")
+        if psc_from_cell and code:
+            token = _strip_token(code + str(prefix_site)[len(code):])
+            sector_prefix = f"{token}_{ne_id}".rstrip("_") if include_ne_id else token
+        site_entry.setdefault("sector_prefixes", {}).setdefault(sector_id, sector_prefix)
         # Two CellName groups of one site can resolve to the SAME sector (e.g.
         # a site whose Logical Sector IDs are 1.1/1.2/2.1/2.2 -> S1,S2,S1,S2).
         # Record it instead of letting the later group silently overwrite the
@@ -717,6 +749,9 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
     _rows, _, _, site_index = build_rows(cdd_path, sheet, mapping, clusters=clusters)
     entry = _site_entry(site_index, site)
     new_prefix = entry["prefix"]
+    # Per-sector DEVICENAME prefixes (site_match.prefix_site_code): a co-located
+    # sector's site code comes from its own CellName, not the NE's.
+    sector_prefixes = entry.get("sector_prefixes", {})
     tilt_by_sector_pos = entry["tilts"]
 
     # Map CTRLSRN -> sector_id by inverting the sector_rule over 1..max_sectors.
@@ -848,7 +883,8 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
             def _sub_devicename(m, rec=rec):
                 tokens = m.group(1).split("_")
                 suffix = "_".join(tokens[prefix_tokens:])
-                new = new_prefix + "_" + suffix if suffix else new_prefix
+                pfx = sector_prefixes.get((rec or {}).get("sector"), new_prefix)
+                new = pfx + "_" + suffix if suffix else pfx
                 if rec is not None:
                     rec["devicename"] = new
                 return 'DEVICENAME="%s"' % new
@@ -945,7 +981,8 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                     pos = r["device_pos"]
                     dev = devices[pos] if pos is not None and pos < len(devices) else {}
                     new_name = "%s_%s_%s%s" % (
-                        new_prefix, dev.get("band_token", ""), sid, dev.get("slot_suffix", ""))
+                        sector_prefixes.get(sid, new_prefix),
+                        dev.get("band_token", ""), sid, dev.get("slot_suffix", ""))
                     # Serial first: a replicated device the input has no serial
                     # for is left out entirely (when skip_unmatched_devices),
                     # the same rule native lines follow — never emit a line

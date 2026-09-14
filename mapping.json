@@ -111,7 +111,14 @@
     "site_match": {
       "field": "ne_name",
       "include_ne_id": false,
-      "note": "'field' is the 4G CDD column the RET-input site name (line 1) is matched against to find the CDD sector, AND which supplies the SITE token of the rewritten DEVICENAME prefix: 'ne_name' = NEName_New (default, e.g. HNIPTH01_LN); 'site_new' = SiteName (RRU Location)_New (e.g. HNIPTH01). 'include_ne_id' appends _{Ne ID} to that token; false to match templates whose DEVICENAME is {site}_{band}_{sector}_{slot} with no Ne ID."
+      "note": "'field' is the 4G CDD column the RET-input site name (line 1) is matched against to find the CDD sector, AND which supplies the SITE token of the rewritten DEVICENAME prefix: 'ne_name' = NEName_New (default, e.g. HNIPTH01_LN); 'site_new' = SiteName (RRU Location)_New (e.g. HNIPTH01). 'include_ne_id' appends _{Ne ID} to that token; false to match templates whose DEVICENAME is {site}_{band}_{sector}_{slot} with no Ne ID.",
+      "prefix_site_code": {
+        "source": "cell_name",
+        "length": 8,
+        "note": "Per-sector override of the DEVICENAME site token: its first `length` characters are replaced by LEFT(CellName (New)[Key], length) of that sector's cell. Own-site sectors are unchanged (their cell already starts with the site code); a co-located sector's DEVICENAME carries ITS OWN cell's site code instead of the NE's. 'cell_name' is the only supported source. Remove this block (or set source to null) to restore the old behavior (whole token from site_match.field for every sector)."
+      },
+      "prefix_strip_suffixes": ["_LN", "_4G"],
+      "_strip_note": "Endings removed (case-insensitive, first match) from the DEVICENAME site token before it is written — NEName_New 'HNIHPU04_LN' becomes 'HNIHPU04', matching templates whose DEVICENAME has no NE suffix. Only the DEVICENAME prefix is affected; RET-input site matching still uses the full NEName_New. Empty list = keep the token as-is."
     },
     "input": {
       "_note": "RET_input.txt: line 1 = site name (== CDD SiteName_New); remaining lines are whitespace/tab separated. Indices are 0-based after splitting.",
@@ -133,7 +140,7 @@
       "_sector_note": "The output covers exactly the sectors the CDD gives the site. extend_sectors: when the site has MORE sectors than the template (e.g. the 6-sector HHK098/HNIHKM33_LN vs the standard 3-sector template), the template's fullest sector block is replicated per missing sector — DEVICENO continues sequentially, CTRLSRN from the sector rule (S4=63, S5=64, S6=65), the DEVICENAME sector token is swapped, and SERIALNO/TILT are matched exactly like native lines. drop_surplus_sectors: a template sector the site does not have is dropped (with a warning) instead of surviving with the template site's serials and tilts."
     },
     "rules": {
-      "devicename": "Replace the leading {prefix_token_count} token(s) of DEVICENAME with the site_match prefix (NEName_New by default, no Ne ID); keep the band/sector/slot suffix from the template.",
+      "devicename": "Replace the leading {prefix_token_count} token(s) of DEVICENAME with the site_match prefix (NEName_New by default, no Ne ID); keep the band/sector/slot suffix from the template. With site_match.prefix_site_code set, the prefix is per-sector: its first `length` chars come from LEFT(CellName, length) of that sector's cell.",
       "serialno": "Replace SERIALNO with the input serial whose (CTRLSRN, RIGHT(serial, serial_suffix_len)) matches the template line's (CTRLSRN, RIGHT(SERIALNO, serial_suffix_len)).",
       "tilt": "Each tilt line's TILT = the RCU Tilt of the ADD RET device with the same DEVICENO. That device is identified from its DEVICENAME suffix ({band_token}_{sector}{slot_suffix} -> sector + which of devices[] it is), so the tilt follows the device even if the ADD RET lines are reordered or a sector is short of devices; CTRLSRN -> sector plus order-of-appearance is only the fallback when the DEVICENAME cannot be parsed."
     }
