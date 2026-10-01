@@ -44,11 +44,15 @@
   },
   "sector_rule": {
     "srn_base": 60,
-    "max_sectors": 9,
+    "max_sectors": 12,
     "colocated_offset": 3,
+    "colocated_stacking": true,
     "match_prefix_len": 8,
+    "site_code_pattern": "^[A-Za-z0-9]+$",
     "digit_from_logical_sector_id": true,
-    "note": "Y (last char of CellName) -> base sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). A co-located offset is then added: if LEFT(NEName_New, match_prefix_len) == LEFT(CellName, match_prefix_len) the cell is the NE's OWN site and keeps its base number (S1,S2,S3,...); otherwise it is a co-located neighbour and gets +colocated_offset (S1->S4, S2->S5, S3->S6). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). NOTE: match_prefix_len is 8 (the site code length); char 9 of NEName_New is the '_'/'-' separator, so a length of 9 never matches. Anything outside 1..max_sectors (e.g. 'M', 'X', dashed VNP names) is skipped. EXCEPTION (digit_from_logical_sector_id): when RIGHT(CellName,1) is a DIGIT, the letter/offset rule does NOT apply; the sector is taken from RIGHT(Logical Sector ID (Site), 1) instead — e.g. LSID '3.1' -> S1, '3.2' -> S2, '3' -> S3 (last char of the LSID = sector number n; rru_srn = srn_base + (n-1); no co-located offset). Falls back to the digit-of-CellName rule only if the Logical Sector ID is blank/unusable."
+    "note": "Y (last char of CellName) -> base sector number: a digit 1-9 is that number; a letter A-I maps to 1-9 (A=S1 ... D=S4 ... I=S9). A co-located offset is then added: if LEFT(NEName_New, match_prefix_len) == LEFT(CellName, match_prefix_len) the cell is the NE's OWN site and keeps its base number (S1,S2,S3,...); otherwise it is a co-located neighbour and gets +colocated_offset (S1->S4, S2->S5, S3->S6). sector_id = S{n}; rru_srn = srn_base + (n - 1) (S1=60, S2=61, ...). NOTE: match_prefix_len is 8 (the site code length); char 9 of NEName_New is the '_'/'-' separator, so a length of 9 never matches. Anything outside 1..max_sectors (e.g. 'M', 'X', dashed VNP names) is skipped. EXCEPTION (digit_from_logical_sector_id): when RIGHT(CellName,1) is a DIGIT, the letter/offset rule does NOT apply; the sector is taken from RIGHT(Logical Sector ID (Site), 1) instead — e.g. LSID '3.1' -> S1, '3.2' -> S2, '3' -> S3 (last char of the LSID = sector number n; rru_srn = srn_base + (n-1); no co-located offset). Falls back to the digit-of-CellName rule only if the Logical Sector ID is blank/unusable.",
+    "_stacking_note": "Sites with MORE THAN 6 RRUs (colocated_stacking=true): colocated_offset is a floor, not a fixed shift. Per NE, its own sectors keep their numbers; each co-located site code (sorted) then starts right after the highest sector already used. Own S1-S3 + one neighbour = the plain +3 (S4-S6). Own S1-S4 (A-D) + neighbour A-D -> S5-S8 (no clash on S4). Two neighbours (e.g. HNIKAH13 A-C and HNIKAH22 A) -> S4-S6 then S7. rru_srn continues: S7=66, S8=67 ... S12=71. Sectors beyond max_sectors are skipped. false = old fixed +colocated_offset.",
+    "_pattern_note": "site_code_pattern: regex the first match_prefix_len chars of CellName must match; rows that don't (the dashed 'VNP-4G-...' names) are skipped as non-conforming. Empty = no check."
   },
   "devices": [
     { "name": "Lb1",  "color": "Lb1",  "band_token": "L1800",      "slot_suffix": "_1", "tilt_band": "C", "tilt_fallback": "D" },

@@ -28,7 +28,16 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   (default `match_prefix_len`=8, the site code) the cell is the NE's own
   site and keeps n; otherwise it is a co-located neighbour and gets
   `+colocated_offset` (default 3: S1→S4, S2→S5, S3→S6). Non-conforming
-  names (e.g. dashed `VNP-4G-…`) skip.
+  names (site code fails `sector_rule.site_code_pattern`, e.g. dashed
+  `VNP-4G-…`) skip.
+  **More than 6 RRUs** (`sector_rule.colocated_stacking`, default on;
+  `max_sectors` 12): `colocated_offset` is a *floor*. Per NE, own sectors keep
+  their numbers and each co-located site code (sorted) starts right after the
+  highest sector already used — own A–D + neighbour A–D → S1–S4 + S5–S8;
+  two neighbours (HNIKAH13 A–C, HNIKAH22 A) → S4–S6 then S7. SRN continues
+  (S7=66, S8=67). Plain own S1–S3 + one neighbour is unchanged (+3). This
+  fixed 165 NEs where a neighbour used to collide on S4; offsets are computed
+  before the BBU Cluster filter so numbering doesn't depend on the selection.
   **Digit exception** (`sector_rule.digit_from_logical_sector_id`): when
   `RIGHT(CellName,1)` is a **digit**, the letter/offset rule does NOT apply;
   the sector is `RIGHT(Logical Sector ID (Site), 1)` instead (LSID `3.1`→S1,
@@ -96,8 +105,8 @@ RET_output.txt MML). Shared logic in `ret_core.py`. Run with `uv run`.
   resolves two CellName groups onto the same sector (S1, S2) — see
   `HNIVTH16_LN`. 223 of 2811 sites in the current CDD are affected. The first
   group wins and a warning is raised; the correct rule is still undecided.
-  Unrelated to sector *count*: 165 sites legitimately have 6 sectors (own S1-S3
-  plus a co-located neighbour at +3), 3 have 7, and those resolve cleanly.
+  Unrelated to sector *count*: with stacking, 172 NEs have 6 sectors and 44
+  have 7–9, all resolving without collisions.
 
 ## Design rules (inherited from ../01.RET — must follow)
 

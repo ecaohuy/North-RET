@@ -133,6 +133,66 @@ def resolve_sector(Y, mapping, offset=0):
     return f"S{n}", base + (n - 1)
 
 
+def colocated_offsets(records, mapping, site_type_skip=()):
+    """Per-NE co-located offsets: {(NE upper, site code upper): offset}.
+
+    Per mapping.json -> sector_rule.colocated_stacking: the NE's own sectors
+    keep their numbers; each co-located site code (sorted) then starts right
+    after the highest sector the NE already uses, but never below
+    colocated_offset. With own S1-S3 and one neighbour this is the plain +3
+    (S1->S4 ... S3->S6); own S1-S4 pushes the neighbour to S5..., and a second
+    neighbour continues after the first (S7, S8, ...) instead of colliding.
+    Returns {} when stacking is off (callers then use the fixed offset).
+    """
+    rule = mapping.get("sector_rule", {})
+    if not rule.get("colocated_stacking", True):
+        return {}
+    match_len = rule.get("match_prefix_len", 8)
+    floor = rule.get("colocated_offset", 3)
+    used = defaultdict(int)                          # NE -> highest sector so far
+    neighbours = defaultdict(lambda: defaultdict(int))  # NE -> {code: max base n}
+    for r in records:
+        cell = r.get("cell_name")
+        cell = str(cell).strip() if cell is not None else ""
+        if len(cell) < 2 or not cell_is_conforming(cell, mapping):
+            continue
+        st = r.get("site_type")
+        if (str(st).strip().lower() if st is not None else "") in site_type_skip:
+            continue
+        ne = str(r.get("ne_name") or "").strip().upper()
+        code = cell[:match_len].upper()
+        Y = cell[-1]
+        if code == ne[:match_len] or (
+                rule.get("digit_from_logical_sector_id", True) and Y.isdigit()):
+            # Own sector, or a digit cell (LSID rule, never offset): occupies n.
+            res = resolve_row_sector(Y, r.get("logical_sector_id"), 0, mapping)
+            if res:
+                used[ne] = max(used[ne], int(res[0][1:]))
+            continue
+        res = resolve_sector(Y, mapping, 0)
+        if res:
+            nb = neighbours[ne]
+            nb[code] = max(nb[code], int(res[0][1:]))
+    out = {}
+    for ne, codes in neighbours.items():
+        top = used[ne]
+        for code in sorted(codes):
+            off = max(floor, top)
+            out[(ne, code)] = off
+            top = off + codes[code]
+    return out
+
+
+def cell_is_conforming(cell, mapping):
+    """False for CellNames whose site code breaks sector_rule.site_code_pattern
+    (e.g. the dashed 'VNP-4G-...' names) — those rows are skipped."""
+    rule = mapping.get("sector_rule", {})
+    pat = rule.get("site_code_pattern")
+    if not pat:
+        return True
+    return re.match(pat, cell[:rule.get("match_prefix_len", 8)]) is not None
+
+
 def resolve_row_sector(Y, lsid, offset, mapping):
     """Resolve a CDD row to (sector_id, rru_srn), honouring the digit exception.
 
@@ -386,12 +446,18 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     def _get(r, field):
         return r.get(field)
 
-    by_sector = defaultdict(dict)   # (site_new, Y) -> {X: e_tilt}
-    sector_ne_id = {}               # (site_new, Y) -> Ne ID (first non-blank)
-    sector_ne_name = {}             # (site_new, Y) -> NEName_New (first non-blank)
-    sector_offset = {}              # (site_new, Y) -> 0 (own site) or colocated_offset
-    sector_lsid = {}                # (site_new, Y) -> Logical Sector ID (first non-blank)
-    sector_cell_code = {}           # (site_new, Y) -> LEFT(CellName, psc_len)
+    # Co-located offset per (NE, neighbour site code), stacked so a site with
+    # more than 6 RRUs (4 own sectors, or 2+ neighbours) never collides.
+    # Computed over all rows (before the BBU Cluster filter) so sector numbers
+    # don't depend on the selection.
+    stacked = colocated_offsets(data.records, mapping, site_type_skip)
+
+    by_sector = defaultdict(dict)   # (site_new, code, Y) -> {X: e_tilt}
+    sector_ne_id = {}               # (site_new, code, Y) -> Ne ID (first non-blank)
+    sector_ne_name = {}             # (site_new, code, Y) -> NEName_New (first non-blank)
+    sector_offset = {}              # (site_new, code, Y) -> 0 (own site) or colocated_offset
+    sector_lsid = {}                # (site_new, code, Y) -> Logical Sector ID (first non-blank)
+    sector_cell_code = {}           # (site_new, code, Y) -> LEFT(CellName, psc_len)
     sector_order = []
     seen = set()
     skipped = []
@@ -421,22 +487,29 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
             bbu = str(bbu).strip() if bbu is not None else ""
             if bbu not in cluster_filter:
                 continue
+        if not cell_is_conforming(cell, mapping):
+            skipped.append((cell, "non-conforming CellName"))
+            continue
         X = cell[-2]   # band letter
         Y = cell[-1]   # sector letter/digit
         # Own site (cell belongs to this NE) keeps its base sector number; a
         # co-located neighbour (LEFT(NEName,N) != LEFT(CellName,N)) is shifted by
-        # colocated_offset (S1->S4, S2->S5, S3->S6).
+        # colocated_offset (S1->S4, S2->S5, S3->S6), stacked past the NE's
+        # highest sector when it has more (see colocated_offsets).
         ne_name_val = _get(r, "ne_name")
         ne_name_val = str(ne_name_val).strip() if ne_name_val is not None else ""
         is_own = ne_name_val[:match_len].upper() == cell[:match_len].upper()
-        offset = 0 if is_own else colocated_offset
+        offset = 0 if is_own else stacked.get(
+            (ne_name_val.upper(), cell[:match_len].upper()), colocated_offset)
         # When RIGHT(CellName,1) is a digit, the sector comes from the Logical
         # Sector ID (Site) instead of the letter/offset rule (see resolve_row_sector).
         lsid_val = _get(r, "logical_sector_id")
         if resolve_row_sector(Y, lsid_val, offset, mapping) is None:
             skipped.append((cell, f"unknown sector Y={Y}"))
             continue
-        key = (site_new, Y)
+        # Keyed by the cell's site code too, so two neighbours sharing a
+        # SiteName_New and sector letter stay separate sectors.
+        key = (site_new, cell[:match_len].upper(), Y)
         if key not in seen:
             seen.add(key)
             sector_order.append(key)
@@ -459,7 +532,7 @@ def build_rows(cdd_path, sheet, mapping, clusters=None):
     rows = []
     site_index = {}
     for key in sector_order:
-        site_new, Y = key
+        site_new, _code, Y = key
         sector_id, rru_srn = resolve_row_sector(
             Y, sector_lsid.get(key), sector_offset.get(key, 0), mapping)
         present = by_sector[key]            # {X: e_tilt} for this sector
@@ -872,11 +945,14 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
     skipped_nos = set()
     out_lines = []
     last_add_idx = last_tilt_idx = None   # where replicated blocks are inserted
+    add_anchor = tilt_anchor = None       # ...or, if none survive, where they were
     for ln in tmpl_lines:
         stripped = ln.lstrip()
         if stripped.startswith(add_prefix):
             m_no = _RE_DEVICENO.search(ln)
             if m_no and m_no.group(1) in dropped_nos:
+                if add_anchor is None:
+                    add_anchor = len(out_lines)
                 continue
             rec = report_by_no.get(m_no.group(1)) if m_no else None
 
@@ -926,6 +1002,8 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
         elif stripped.startswith(tilt_prefixes):
             m_no = _RE_DEVICENO.search(ln)
             if m_no and m_no.group(1) in (dropped_nos | skipped_nos):
+                if tilt_anchor is None:
+                    tilt_anchor = len(out_lines)
                 continue
             if m_no:
                 tilt = deviceno_tilt.get(m_no.group(1))
@@ -953,6 +1031,14 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
         for r in report:
             if r["matched_by"] == "DEVICENAME" and r["deviceno"] not in dropped_nos:
                 proto_recs.setdefault(r["sector"], []).append(r)
+        if not proto_recs:
+            # Every template sector was dropped (e.g. an NE whose own cells are
+            # filtered IBC, leaving only co-located S4+). The dropped blocks
+            # still carry the template's formatting; their serials and tilts
+            # are replaced below, so they are a valid style source.
+            for r in report:
+                if r["matched_by"] == "DEVICENAME":
+                    proto_recs.setdefault(r["sector"], []).append(r)
         proto_sid = max(proto_recs, key=lambda s: len(proto_recs[s]), default=None)
         if proto_sid is None:
             warnings.append(
@@ -1045,10 +1131,13 @@ def build_text_output(template_path, input_path, cdd_path, sheet, mapping,
                 warnings.append(
                     "Template covers %s but %s has %d sector(s) in the CDD — the %s "
                     "block was replicated for %s."
-                    % ("/".join(sorted(template_sectors - surplus_sectors, key=_sector_num)),
+                    % ("/".join(sorted(template_sectors - surplus_sectors, key=_sector_num))
+                       or "none of its sectors",
                        site, len(site_sectors), proto_sid, ", ".join(missing_sectors)))
-                add_at = len(out_lines) if last_add_idx is None else last_add_idx + 1
-                tilt_at = len(out_lines) if last_tilt_idx is None else last_tilt_idx + 1
+                add_at = (last_add_idx + 1 if last_add_idx is not None
+                          else add_anchor if add_anchor is not None else len(out_lines))
+                tilt_at = (last_tilt_idx + 1 if last_tilt_idx is not None
+                           else tilt_anchor if tilt_anchor is not None else len(out_lines))
                 if tilt_at >= add_at:
                     out_lines[tilt_at:tilt_at] = new_tilts
                     out_lines[add_at:add_at] = new_adds
